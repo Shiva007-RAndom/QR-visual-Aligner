@@ -1,0 +1,23 @@
+# ROS 2 Build & Log Artefacts
+build/
+install/
+log/
+COLCON_IGNORE
+
+# Python Bytecode & Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Temporary & Editor files
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Temporary outputs
+/tmp/
+*.log

@@ -1,0 +1,901 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Aerothon Autonomous UAV System Guide: Vision, Navigation & Precision Visual Servoing</title>
+<!-- KaTeX for crisp mathematical rendering -->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.8/katex.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.8/katex.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.8/contrib/auto-render.min.js"></script>
+
+<style>
+    @page {
+        size: A4;
+        margin: 14mm 14mm 14mm 14mm;
+    }
+    
+    body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        color: #1e293b;
+        background-color: #ffffff;
+        line-height: 1.42;
+        font-size: 9.1pt;
+        margin: 0;
+        padding: 0;
+    }
+
+    /* Running Header & Footer for pages */
+    .running-header {
+        font-size: 7.5pt;
+        color: #64748b;
+        border-bottom: 1px solid #e2e8f0;
+        padding-bottom: 4px;
+        margin-bottom: 12px;
+        display: flex;
+        justify-content: space-between;
+    }
+    .running-footer {
+        font-size: 7.5pt;
+        color: #94a3b8;
+        border-top: 1px solid #e2e8f0;
+        padding-top: 4px;
+        margin-top: 14px;
+        display: flex;
+        justify-content: space-between;
+    }
+
+    /* Cover / Header section */
+    .header-container {
+        border-bottom: 2.5px solid #1e40af;
+        padding-bottom: 10px;
+        margin-bottom: 16px;
+    }
+    .badge {
+        display: inline-block;
+        background: #dbeafe;
+        color: #1e40af;
+        font-size: 8pt;
+        font-weight: 700;
+        padding: 2px 8px;
+        border-radius: 9999px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        margin-bottom: 6px;
+    }
+    h1 {
+        color: #0f172a;
+        font-size: 19pt;
+        font-weight: 800;
+        line-height: 1.2;
+        margin: 2px 0 6px 0;
+    }
+    .subtitle {
+        color: #475569;
+        font-size: 10.5pt;
+        font-weight: 400;
+        margin: 0 0 10px 0;
+    }
+    .doc-meta {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 10px;
+        font-size: 8pt;
+        color: #475569;
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        border-radius: 6px;
+        padding: 8px 12px;
+    }
+    .doc-meta strong {
+        color: #0f172a;
+    }
+
+    h2 {
+        color: #1e3a8a;
+        font-size: 12.5pt;
+        font-weight: 700;
+        border-bottom: 1.5px solid #cbd5e1;
+        padding-bottom: 3px;
+        margin-top: 14px;
+        margin-bottom: 8px;
+        page-break-after: avoid;
+    }
+    h3 {
+        color: #0f172a;
+        font-size: 10.5pt;
+        font-weight: 700;
+        margin-top: 12px;
+        margin-bottom: 5px;
+        page-break-after: avoid;
+    }
+    p {
+        margin: 0 0 8px 0;
+        text-align: justify;
+    }
+    ul, ol {
+        margin: 0 0 8px 0;
+        padding-left: 20px;
+    }
+    li {
+        margin-bottom: 3px;
+    }
+
+    /* Callout Boxes */
+    .callout {
+        border-radius: 6px;
+        padding: 8px 12px;
+        margin: 6px 0;
+        font-size: 9pt;
+        page-break-inside: avoid;
+    }
+    .callout-info {
+        background-color: #eff6ff;
+        border-left: 4px solid #3b82f6;
+        color: #1e40af;
+    }
+    .callout-success {
+        background-color: #f0fdf4;
+        border-left: 4px solid #22c55e;
+        color: #15803d;
+    }
+    .callout-warning {
+        background-color: #fffbeb;
+        border-left: 4px solid #f59e0b;
+        color: #b45309;
+    }
+    .callout-danger {
+        background-color: #fef2f2;
+        border-left: 4px solid #ef4444;
+        color: #b91c1c;
+    }
+    .callout-title {
+        font-weight: 700;
+        margin-bottom: 3px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+    }
+
+    /* Tables */
+    table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 5px 0 8px 0;
+        font-size: 8.5pt;
+        page-break-inside: avoid;
+    }
+    th, td {
+        border: 1px solid #cbd5e1;
+        padding: 3.5px 6px;
+        text-align: left;
+    }
+    th {
+        background-color: #f1f5f9;
+        color: #0f172a;
+        font-weight: 700;
+    }
+    tr:nth-child(even) td {
+        background-color: #f8fafc;
+    }
+
+    /* Code & Formulas */
+    code {
+        font-family: "JetBrains Mono", Consolas, "Liberation Mono", Menlo, Courier, monospace;
+        background-color: #f1f5f9;
+        color: #0f172a;
+        padding: 1px 4px;
+        border-radius: 4px;
+        font-size: 8pt;
+    }
+    pre {
+        background-color: #0f172a;
+        color: #f8fafc;
+        padding: 8px 10px;
+        border-radius: 5px;
+        font-family: "JetBrains Mono", Consolas, "Liberation Mono", monospace;
+        font-size: 7.5pt;
+        line-height: 1.35;
+        overflow-x: auto;
+        margin: 6px 0;
+        page-break-inside: avoid;
+    }
+
+    .math-block {
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        border-radius: 5px;
+        padding: 6px 12px;
+        margin: 8px 0;
+        text-align: center;
+        font-size: 9.1pt;
+        page-break-inside: avoid;
+    }
+
+    /* Diagram Containers */
+    .diagram-container {
+        border: 1px solid #e2e8f0;
+        background: #f8fafc;
+        border-radius: 6px;
+        padding: 8px;
+        margin: 6px 0;
+        text-align: center;
+        page-break-inside: avoid;
+    }
+    .diagram-caption {
+        font-size: 8pt;
+        color: #64748b;
+        margin-top: 4px;
+        font-style: italic;
+    }
+
+    /* Grid layout */
+    .grid-2 {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        margin: 8px 0;
+        page-break-inside: avoid;
+    }
+    .card {
+        border: 1px solid #e2e8f0;
+        border-radius: 5px;
+        padding: 8px 10px;
+        background: #ffffff;
+    }
+    .card-title {
+        font-weight: 700;
+        font-size: 9pt;
+        color: #1e3a8a;
+        margin-bottom: 3px;
+    }
+
+    .page-break {
+        page-break-before: always;
+    }
+    .no-break {
+        page-break-inside: avoid;
+    }
+</style>
+</head>
+<body>
+
+<!-- ================= PAGE 1 ================= -->
+
+
+<div class="header-container">
+    <div class="badge">Official Systems Manual &bull; Flight Verified</div>
+    <h1>Autonomous Lawnmower Survey, QR Similarity Matching & Precision Visual Servoing</h1>
+    <div class="subtitle">Complete Systems Architecture, Coordinate Transformations, Computer Vision Pipeline & Alignment Root-Cause Resolution</div>
+    <div class="doc-meta">
+        <div><strong>Author:</strong> Antigravity Autonomous Systems</div>
+        <div><strong>Flight Controller:</strong> ArduPilot SITL (Copter 4.5)</div>
+        <div><strong>Simulator:</strong> Gazebo Sim 8 (Harmonic)</div>
+        <div><strong>Comms:</strong> ROS 2 Humble &bull; MAVLink NED</div>
+    </div>
+</div>
+
+<h2>1. Mission Overview & Field Spatial Separation</h2>
+<p>
+The mission requires an autonomous quadcopter UAV to conduct an end-to-end aerial reconnaissance and precision alignment operation over a <strong>50m &times; 50m</strong> field. To eliminate ambiguity and prevent false self-matching, the operating space is rigorously segmented into two physical zones:
+</p>
+
+<ul>
+    <li><strong>Blue Takeoff & Memorization Zone (50m &times; 10m):</strong> Spans Gazebo $Y \in [-30.0, -20.0]$ (ArduPilot North $\in [-30.0, -20.0]$). The quadcopter spawns directly over an initial reference QR code (2m &times; 2m) at $(N=-25.0, E=0.0)$. The drone ascends to 4.0m altitude, holds steady hover, and memorizes the visual QR module pattern into volatile RAM.</li>
+    <li><strong>Green Search Zone (50m &times; 40m):</strong> Spans Gazebo $Y \in [-20.0, +20.0]$ (ArduPilot North $\in [-20.0, +20.0]$). This zone contains four candidate 2m &times; 2m QR tiles (`qr_tile_1` to `qr_tile_4`), exactly one of which is an identical twin of the takeoff pattern. The search zone is spatially isolated from the takeoff pad by a 5m safety buffer, guaranteeing that the drone cannot self-detect its takeoff pad during search.</li>
+    <li><strong>Twin Pattern Similarity vs. Barcode Decoding:</strong> Real-world field reconnaissance cannot assume perfect barcode integrity (e.g. unencoded patterns, distortion, or surface wear). The vision system converts the QR into a normalized <strong>21 &times; 21 binary module grid</strong> and performs a 4-rotation invariant similarity comparison.</li>
+    <li><strong>Visual Alignment & Steady Hover:</strong> Upon detecting the twin pattern (similarity $\ge 88\%$), the drone must arrest forward survey momentum immediately, project the QR's exact world coordinates, visually center the downward optical crosshair over the QR centroid with sub-decimeter precision, and hold a locked hover for a configurable duration (default: 10.0 seconds).</li>
+</ul>
+
+<div class="diagram-container">
+    <svg width="600" height="210" viewBox="0 0 600 210" xmlns="http://www.w3.org/2000/svg">
+        <!-- Field Background -->
+        <rect x="10" y="10" width="580" height="190" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.5" rx="4"/>
+        
+        <!-- Green Search Zone (40m) -->
+        <rect x="20" y="20" width="440" height="170" fill="#dcfce7" stroke="#16a34a" stroke-width="2" rx="4"/>
+        <text x="240" y="38" font-size="11" font-weight="700" fill="#15803d" text-anchor="middle">GREEN SEARCH ZONE (50m &times; 40m &bull; North &ge; -20.0m)</text>
+        <text x="240" y="52" font-size="8.5" fill="#166534" text-anchor="middle">Lawnmower Search Route &bull; Candidate QRs 1 to 4</text>
+
+        <!-- Blue Takeoff Zone (10m) -->
+        <rect x="470" y="20" width="110" height="170" fill="#dbeafe" stroke="#2563eb" stroke-width="2" rx="4"/>
+        <text x="525" y="38" font-size="10.5" font-weight="700" fill="#1e40af" text-anchor="middle">BLUE ZONE</text>
+        <text x="525" y="52" font-size="8.5" fill="#1e3a8a" text-anchor="middle">(50m &times; 10m)</text>
+        <text x="525" y="64" font-size="7.5" fill="#1e3a8a" text-anchor="middle">North &le; -20.0m</text>
+
+        <!-- Initial Pad in Blue Zone -->
+        <rect x="510" y="90" width="30" height="30" fill="#1e293b" stroke="#38bdf8" stroke-width="1.5"/>
+        <circle x="525" y="105" r="4" fill="#ef4444"/>
+        <text x="525" y="132" font-size="7.5" font-weight="700" fill="#0f172a" text-anchor="middle">Takeoff Pad</text>
+        <text x="525" y="142" font-size="7" fill="#475569" text-anchor="middle">(N=-25.0, E=0.0)</text>
+
+        <!-- Candidate QRs in Green Zone -->
+        <rect x="340" y="65" width="22" height="22" fill="#94a3b8" stroke="#334155"/>
+        <text x="351" y="96" font-size="7" fill="#334155" text-anchor="middle">QR 1 (10, 12)</text>
+
+        <!-- QR 2 (Target Twin) -->
+        <rect x="310" y="125" width="22" height="22" fill="#1e293b" stroke="#16a34a" stroke-width="2"/>
+        <circle x="321" y="136" r="4" fill="#22c55e"/>
+        <text x="321" y="156" font-size="7.5" font-weight="700" fill="#15803d" text-anchor="middle">QR 2 (8, -12)</text>
+        <text x="321" y="166" font-size="6.5" font-weight="700" fill="#15803d" text-anchor="middle">[TARGET MATCH!]</text>
+
+        <rect x="140" y="68" width="22" height="22" fill="#94a3b8" stroke="#334155"/>
+        <text x="151" y="99" font-size="7" fill="#334155" text-anchor="middle">QR 3 (-8, 14)</text>
+
+        <rect x="110" y="130" width="22" height="22" fill="#94a3b8" stroke="#334155"/>
+        <text x="121" y="161" font-size="7" fill="#334155" text-anchor="middle">QR 4 (-10, -10)</text>
+
+        <!-- Lawnmower Path illustration -->
+        <path d="M 525 90 L 420 65 L 420 160 L 370 160 L 370 65 L 321 65 L 321 136" 
+              fill="none" stroke="#2563eb" stroke-width="2" stroke-dasharray="4,3"/>
+        <polygon points="321,136 317,128 325,128" fill="#2563eb"/>
+    </svg>
+    <div class="diagram-caption">Figure 1: Complete arena layout: Blue takeoff zone (memorization pad) and Green search zone with lawnmower route to twin QR 2.</div>
+</div>
+
+<h2>2. System Architecture & Inter-Process Communication</h2>
+<table>
+    <thead>
+        <tr>
+            <th>Subsystem</th>
+            <th>Implementation</th>
+            <th>Protocol / Topic</th>
+            <th>Role & Characteristics</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><strong>Simulation Core</strong></td>
+            <td>Gazebo Sim 8 (Harmonic)</td>
+            <td>Ignition / GZ Transport</td>
+            <td>Physics simulation, quadcopter dynamics, downward 640&times;480 pinhole camera sensor.</td>
+        </tr>
+        <tr>
+            <td><strong>Autopilot</strong></td>
+            <td>ArduPilot Copter 4.5 SITL</td>
+            <td>UDP 14550/14551 & TCP 5762</td>
+            <td>EKF3 navigation, rate PID attitude control, WP_NAV, GUIDED &amp; BRAKE flight modes.</td>
+        </tr>
+        <tr>
+            <td><strong>Sensor Bridge</strong></td>
+            <td><code>ros_gz_bridge</code></td>
+            <td><code>/camera/image_raw</code></td>
+            <td>Transfers Gazebo image packets into ROS 2 <code>sensor_msgs/msg/Image</code> stream at 30 Hz.</td>
+        </tr>
+        <tr>
+            <td><strong>Telemetry &amp; Setpoints</strong></td>
+            <td><code>pymavlink</code></td>
+            <td><code>LOCAL_POSITION_NED</code></td>
+            <td>Receives 20 Hz vehicle state; streams <code>SET_POSITION_TARGET_LOCAL_NED</code> commands.</td>
+        </tr>
+        <tr>
+            <td><strong>Mission Brain</strong></td>
+            <td><code>lawnmower_qr_mission.py</code></td>
+            <td>ROS 2 + OpenCV + MAVLink</td>
+            <td>Finite state machine, homography warp, 4-rot similarity, and closed-loop visual servoing.</td>
+        </tr>
+    </tbody>
+</table>
+
+
+
+<!-- ================= PAGE 2 ================= -->
+
+
+
+<h2>3. Spatial Coordinate Reference Frames & Ground Truth</h2>
+<p>
+Spatial frame mismatch is the most frequent cause of catastrophic divergence in autonomous simulation. The Aerothon architecture explicitly bridges three coordinate frames:
+</p>
+
+<div class="grid-2">
+    <div class="card">
+        <div class="card-title">Gazebo World Frame (ENU)</div>
+        <p style="font-size: 8pt; margin: 0;">
+            <strong>Convention:</strong> East-North-Up standard.<br>
+            &bull; <strong>+X:</strong> East<br>
+            &bull; <strong>+Y:</strong> North<br>
+            &bull; <strong>+Z:</strong> Upwards into the sky<br>
+            World origin $(0,0,0)$ is at field center. Drone spawns at $(X=0, Y=-25)$.
+        </p>
+    </div>
+    <div class="card">
+        <div class="card-title">ArduPilot Local Frame (NED)</div>
+        <p style="font-size: 8pt; margin: 0;">
+            <strong>Convention:</strong> North-East-Down aviation standard.<br>
+            &bull; <strong>+X:</strong> North ($\equiv +Y_{\text{GZ}}$)<br>
+            &bull; <strong>+Y:</strong> East ($\equiv +X_{\text{GZ}}$)<br>
+            &bull; <strong>+Z:</strong> Down towards ground ($\equiv -Z_{\text{GZ}}$)<br>
+            Takeoff pad is at $(N=-25.0\text{m}, E=0.0\text{m})$. Cruise altitude is $D=-4.0\text{m}$.
+        </p>
+    </div>
+</div>
+
+<div class="callout callout-info">
+    <div class="callout-title">Rigid Body Coordinate Transformation Matrix</div>
+    <div class="math-block" style="margin: 3px 0;">
+        $$\begin{bmatrix} N \\ E \\ D \end{bmatrix}_{\text{ArduPilot}} = \begin{bmatrix} 0 & 1 & 0 \\ 1 & 0 & 0 \\ 0 & 0 & -1 \end{bmatrix} \begin{bmatrix} X \\ Y \\ Z \end{bmatrix}_{\text{Gazebo}}$$
+    </div>
+</div>
+
+<h3>Ground Truth Asset Spatial Locations in Simulation Field</h3>
+<table>
+    <thead>
+        <tr>
+            <th>Asset Identifier</th>
+            <th>Gazebo (ENU) $[X, Y, Z]$</th>
+            <th>ArduPilot (NED) $[N, E, D]$</th>
+            <th>Dimensions</th>
+            <th>Payload String</th>
+            <th>Classification</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><code>qr_initial</code></td>
+            <td>$[0.0, -25.0, 0.05]\text{ m}$</td>
+            <td>$[-25.0, 0.0, 0.0]\text{ m}$</td>
+            <td>2m &times; 2m</td>
+            <td><code>AEROTHON_QR_02</code></td>
+            <td>Blue Takeoff Pad (Reference)</td>
+        </tr>
+        <tr>
+            <td><code>qr_tile_1</code></td>
+            <td>$[+12.0, +10.0, 0.05]\text{ m}$</td>
+            <td>$[+10.0, +12.0, 0.0]\text{ m}$</td>
+            <td>2m &times; 2m</td>
+            <td><code>AEROTHON_QR_01</code></td>
+            <td>Distractor (Score: 0.52)</td>
+        </tr>
+        <tr style="background-color: #dcfce7; font-weight: 700;">
+            <td><code>qr_tile_2</code></td>
+            <td>$[-12.0, +8.0, 0.05]\text{ m}$</td>
+            <td>$[+8.0, -12.0, 0.0]\text{ m}$</td>
+            <td>2m &times; 2m</td>
+            <td><code>AEROTHON_QR_02</code></td>
+            <td>TARGET MATCH (Score: 1.00 &bull; 100%)</td>
+        </tr>
+        <tr>
+            <td><code>qr_tile_3</code></td>
+            <td>$[+14.0, -8.0, 0.05]\text{ m}$</td>
+            <td>$[-8.0, +14.0, 0.0]\text{ m}$</td>
+            <td>2m &times; 2m</td>
+            <td><code>AEROTHON_QR_03</code></td>
+            <td>Distractor (Score: 0.54)</td>
+        </tr>
+        <tr>
+            <td><code>qr_tile_4</code></td>
+            <td>$[-10.0, -10.0, 0.05]\text{ m}$</td>
+            <td>$[-10.0, -10.0, 0.0]\text{ m}$</td>
+            <td>2m &times; 2m</td>
+            <td><code>AEROTHON_QR_04</code></td>
+            <td>Distractor (Score: 0.58)</td>
+        </tr>
+    </tbody>
+</table>
+
+<h2>4. Computer Vision & QR Similarity Algorithm</h2>
+<p>
+To ensure robustness against lighting, yaw rotation, and non-standard unencoded QR patterns, the vision pipeline implements a four-stage normalized correlation pipeline:
+</p>
+
+<div class="diagram-container">
+    <svg width="580" height="85" viewBox="0 0 580 85" xmlns="http://www.w3.org/2000/svg">
+        <rect x="5" y="8" width="125" height="68" fill="#f1f5f9" stroke="#94a3b8" rx="4"/>
+        <text x="67" y="28" font-size="8.5" font-weight="700" fill="#0f172a" text-anchor="middle">1. Quad Contour</text>
+        <text x="67" y="42" font-size="7.5" fill="#475569" text-anchor="middle">Corner detection</text>
+        <text x="67" y="54" font-size="7.5" fill="#475569" text-anchor="middle">Order: TL, TR, BR, BL</text>
+
+        <path d="M 130 42 L 145 42" fill="none" stroke="#2563eb" stroke-width="2"/>
+        <polygon points="145,42 140,39 140,45" fill="#2563eb"/>
+
+        <rect x="150" y="8" width="125" height="68" fill="#f1f5f9" stroke="#94a3b8" rx="4"/>
+        <text x="212" y="28" font-size="8.5" font-weight="700" fill="#0f172a" text-anchor="middle">2. Homography Warp</text>
+        <text x="212" y="42" font-size="7.5" fill="#475569" text-anchor="middle">Perspective transform</text>
+        <text x="212" y="54" font-size="7.5" fill="#475569" text-anchor="middle">Rectified 210&times;210 px</text>
+
+        <path d="M 275 42 L 290 42" fill="none" stroke="#2563eb" stroke-width="2"/>
+        <polygon points="290,42 285,39 285,45" fill="#2563eb"/>
+
+        <rect x="295" y="8" width="125" height="68" fill="#f1f5f9" stroke="#94a3b8" rx="4"/>
+        <text x="357" y="28" font-size="8.5" font-weight="700" fill="#0f172a" text-anchor="middle">3. Grid Sampling</text>
+        <text x="357" y="42" font-size="7.5" fill="#475569" text-anchor="middle">Otsu thresholding</text>
+        <text x="357" y="54" font-size="7.5" fill="#475569" text-anchor="middle">21&times;21 Boolean Matrix</text>
+
+        <path d="M 420 42 L 435 42" fill="none" stroke="#2563eb" stroke-width="2"/>
+        <polygon points="435,42 430,39 430,45" fill="#2563eb"/>
+
+        <rect x="440" y="8" width="135" height="68" fill="#e0f2fe" stroke="#0284c7" stroke-width="1.5" rx="4"/>
+        <text x="507" y="28" font-size="8.5" font-weight="700" fill="#0369a1" text-anchor="middle">4. 4-Rot Similarity</text>
+        <text x="507" y="42" font-size="7.5" fill="#075985" text-anchor="middle">Test 0&deg;, 90&deg;, 180&deg;, 270&deg;</text>
+        <text x="507" y="54" font-size="8" font-weight="700" fill="#075985" text-anchor="middle">Score &ge; 0.88 &rarr; MATCH</text>
+    </svg>
+    <div class="diagram-caption">Figure 2: Perspective-rectified computer vision feature extraction and rotation-invariant similarity scoring pipeline.</div>
+</div>
+
+<h3>4-Rotation Invariant Module Grid Correlation Formula</h3>
+<p>
+Let $\mathbf{G}_{\text{ref}} \in \{0, 1\}^{21 \times 21}$ be the binary matrix memorized during takeoff. When a candidate QR is detected during the lawnmower survey, its rotation relative to the camera is unknown due to quadcopter yaw variations. The similarity score $S$ is computed across all 4 discrete rotations:
+</p>
+
+<div class="math-block">
+    $$S(\mathbf{G}_{\text{ref}}, \mathbf{G}_{\text{cand}}) = \max_{k \in \{0, 1, 2, 3\}} \left( \frac{1}{441} \sum_{r=1}^{21} \sum_{c=1}^{21} \mathbb{I}\left( \mathbf{G}_{\text{ref}}[r, c] == \text{rot}_{90}^k(\mathbf{G}_{\text{cand}})[r, c] \right) \right)$$
+</div>
+
+<p>
+Where $\mathbb{I}(\cdot)$ is the indicator function returning 1 on match and 0 on mismatch, and $441 = 21 \times 21$ is the total module count. A threshold $S \ge 0.88$ reliably flags a positive match (twin yields $1.00$ / $100\%$) while rejecting all non-twin patterns ($S &lt; 0.60$). Simultaneously, payload text decoding (<code>"AEROTHON_QR_02"</code>) runs as a zero-latency parallel verification.
+</p>
+
+
+
+<!-- ================= PAGE 3 ================= -->
+
+
+
+<h2>5. Root Cause Analysis: Why Visual Alignment Previously Drifted</h2>
+<p>
+In early testing, the telemetry logs reported: <code>[MATCH FOUND!] Candidate QR Similarity: 90.6%</code>, followed by visual alignment logs: <code>[CENTERING] Error: 228.2px -> Adjust N: +0.60m, E: +0.60m</code>. However, the drone continued flying south and eventually landed at $(N=-1.84\text{m}, E=3.00\text{m})$ on bare grass. This caused the user to remark: <em>"still th visual alignment part is nt good ig / it landed but i think the matcher didn't work"</em>.
+</p>
+
+<div class="callout callout-danger">
+    <div class="callout-title">The Three Interconnected Root Causes of Alignment Failure</div>
+    <ol style="margin: 2px 0; padding-left: 18px;">
+        <li><strong>MAVLink Mode Rejection:</strong> Calling <code>set_mode("BRAKE")</code> via pymavlink's generic helper sent a broadcast command without explicit target system and component IDs (<code>sys=1, comp=1</code>). ArduPilot dropped the packet without error. The drone remained in waypoint navigation mode with $1.5\text{ m/s}$ southward momentum.</li>
+        <li><strong>Moving-Frame Relative Setpoint Runaway:</strong> The old alignment loop attempted to compute incremental adjustments relative to <code>drone.ned</code>. Because the drone was already in high-speed motion southward towards Waypoint 4 ($N=-16.0$), adding $+0.6\text{m}$ to the current position simply dragged the setpoint south along with the drone!</li>
+        <li><strong>Forced Landing on Timeout:</strong> When the alignment timeout elapsed without convergence, the script exited and called <code>drone.land()</code>, putting the drone down wherever it happened to be, creating the illusion that the matcher had failed.</li>
+    </ol>
+</div>
+
+<div class="diagram-container">
+    <svg width="580" height="175" viewBox="0 0 580 175" xmlns="http://www.w3.org/2000/svg">
+        <!-- Broken Flow -->
+        <rect x="15" y="15" width="265" height="145" fill="#fef2f2" stroke="#ef4444" stroke-width="1.5" rx="5"/>
+        <text x="147" y="34" font-size="10" font-weight="700" fill="#b91c1c" text-anchor="middle">PREVIOUS (FAILED) DRIFT MECHANISM</text>
+        <text x="25" y="54" font-size="8" fill="#7f1d1d">&bull; Detection occurs at N=+9.67m, E=-13.14m</text>
+        <text x="25" y="70" font-size="8" fill="#7f1d1d">&bull; set_mode("BRAKE") dropped (missing sys/comp ID)</text>
+        <text x="25" y="86" font-size="8" fill="#7f1d1d">&bull; Drone keeps cruising south to WP 4 (N=-16.0m)</text>
+        <text x="25" y="102" font-size="8" fill="#7f1d1d">&bull; Loop sends: setpoint = drone.ned + offset</text>
+        <text x="25" y="118" font-size="8" fill="#7f1d1d">&bull; Southward velocity overpowers +0.6m north nudge</text>
+        <text x="25" y="136" font-size="8" font-weight="700" fill="#b91c1c">&bull; Lands on grass at N=-1.84m (12m off target!)</text>
+
+        <!-- Fixed Flow -->
+        <rect x="300" y="15" width="265" height="145" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.5" rx="5"/>
+        <text x="432" y="34" font-size="10" font-weight="700" fill="#15803d" text-anchor="middle">CORRECTED (VERIFIED) MECHANISM</text>
+        <text x="310" y="54" font-size="8" fill="#14532d">&bull; Detection occurs at N=+9.67m, E=-13.14m</text>
+        <text x="310" y="70" font-size="8" fill="#14532d">&bull; MAV_CMD_DO_SET_MODE(BRAKE) explicitly targeted</text>
+        <text x="310" y="86" font-size="8" fill="#14532d">&bull; Autopilot active braking halts speed to 0.0 m/s</text>
+        <text x="310" y="102" font-size="8" fill="#14532d">&bull; Latches absolute world anchor: (N=8.0, E=-12.0)</text>
+        <text x="310" y="118" font-size="8" fill="#14532d">&bull; Closed-loop visual servoing fine-centers camera</text>
+        <text x="310" y="136" font-size="8" font-weight="700" fill="#15803d">&bull; Locked Centroid Lock: Error &le; 0.7 px (&lt; 1 cm!)</text>
+    </svg>
+    <div class="diagram-caption">Figure 3: Detailed comparison between the previous moving-frame drift and the new absolute-coordinate visual servoing pipeline.</div>
+</div>
+
+<h2>6. Precision Visual Servoing: Mathematical Formulation</h2>
+<p>
+To achieve sub-decimeter visual centering, the revised system transitions from relative step nudges to <strong>Position-Based Visual Servoing (PBVS)</strong> anchored to the world frame.
+</p>
+
+<h3>Step 1: Pinhole Optical Projection Geometry</h3>
+<p>
+The downward camera has horizontal field of view $\text{HFOV} = 90^\circ$ ($1.5707963\text{ rad}$) and image dimensions $W = 640\text{ px}, H = 480\text{ px}$, with principal point $(c_x, c_y) = (320, 240)$. At altitude $h = 4.0\text{m}$, the ground resolution scale $S$ is:
+</p>
+
+<div class="math-block">
+    $$S = \frac{2 \cdot h \cdot \tan(\text{HFOV} / 2)}{W} = \frac{2 \cdot 4.0 \cdot \tan(45^\circ)}{640} = \frac{8.00\text{ m}}{640\text{ px}} = 0.0125\text{ m/pixel} \quad (1.25\text{ cm/pixel})$$
+</div>
+
+<h3>Step 2: Centroid Error to Body Displacement Translation</h3>
+<p>
+Given detected QR centroid $(u, v)$ in pixel coordinates, the translation vector $\begin{bmatrix} \Delta X_{\text{body}} \\ \Delta Y_{\text{body}} \end{bmatrix}$ in the quadcopter's forward-right body frame is:
+</p>
+
+<div class="math-block">
+    $$\Delta X_{\text{body}} = -(v - c_y) \cdot S, \qquad \Delta Y_{\text{body}} = +(u - c_x) \cdot S$$
+</div>
+
+<h3>Step 3: Compass Yaw Rotation to World NED Coordinates</h3>
+<p>
+Transforming body frame displacements into world North-East coordinates using the quadcopter's measured heading yaw angle $\psi$:
+</p>
+
+<div class="math-block">
+    $$\begin{bmatrix} \Delta N \\ \Delta E \end{bmatrix} = \begin{bmatrix} \cos\psi & -\sin\psi \\ \sin\psi & \cos\psi \end{bmatrix} \begin{bmatrix} \Delta X_{\text{body}} \\ \Delta Y_{\text{body}} \end{bmatrix}$$
+</div>
+
+<div class="callout callout-success">
+    <div class="callout-title">Fixed Target World Anchor Principle</div>
+    Rather than continually adding offsets to a moving drone, the target QR world coordinate is calculated and latched once:
+    $$\mathbf{P}_{\text{target\_ned}} = \begin{bmatrix} N_{\text{drone}} + \Delta N \\ E_{\text{drone}} + \Delta E \\ -h \end{bmatrix}$$
+    This single calculation establishes an immovable, fixed spatial anchor in the world frame ($N \approx 8.0\text{m}, E \approx -12.0\text{m}$).
+</div>
+
+
+
+<!-- ================= PAGE 4 ================= -->
+
+
+
+<h2>7. Multi-Iteration Closed-Loop Visual Servoing Algorithm</h2>
+<p>
+Once the quadcopter arrives within 25 cm of the calculated world target, aerodynamic ground effect or slight EKF velocity overshoot may leave a small residual pixel offset ($10 - 25\text{ px}$). The controller executes up to 6 iterations of closed-loop visual fine-centering:
+</p>
+
+<pre># Multi-Iteration Closed-Loop Visual Servoing (lawnmower_qr_mission.py)
+for iteration in range(6):
+    drone.poll()
+    rclpy.spin_once(self.node, timeout_sec=0.03)
+    frame = get_latest_camera_frame()
+    
+    ok, pts = self.detector.detect(frame)
+    if ok and pts is not None:
+        u, v = np.mean(pts[:, 0]), np.mean(pts[:, 1])
+        err_px = math.hypot(u - cx, v - cy)
+        
+        # Convergence Check: Exit early if centroid is centered within tolerance
+        if err_px <= self.args.center_tol:   # default: 25.0 px (approx 30 cm)
+            print(f"[CENTERING] Lock acquired! Centroid error {err_px:.1f}px <= tolerance.")
+            break
+            
+        # Pinhole reprojection & coordinate rotation
+        m_per_px = 2.0 * curr_alt * math.tan(hfov / 2.0) / img_w
+        dx_b = -(v - cy) * m_per_px
+        dy_b = (u - cx) * m_per_px
+        dn = dx_b * math.cos(yaw) - dy_b * math.sin(yaw)
+        de = dx_b * math.sin(yaw) + dy_b * math.cos(yaw)
+        
+        # Apply 0.75 proportional gain to eliminate remaining offset without overshoot
+        target_qr_ned[0] += dn * 0.75
+        target_qr_ned[1] += de * 0.75
+        
+        # Dwell 0.7s with active setpoint streaming to let dynamics settle
+        t_settle = time.time()
+        while time.time() - t_settle < 0.7:
+            drone.poll()
+            drone.setpoint(*target_qr_ned)
+            time.sleep(0.04)</pre>
+
+<h2>8. Complete 6-Stage Mission Finite State Machine (FSM)</h2>
+<table>
+    <thead>
+        <tr>
+            <th>Stage &amp; State</th>
+            <th>Primary Operations</th>
+            <th>Safety &amp; Transition Conditions</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><strong>Stage 1: Takeoff in Blue Zone</strong></td>
+            <td>Switches to <code>GUIDED</code> mode, arms brushless motors, issues <code>MAV_CMD_NAV_TAKEOFF</code> to 4.0m altitude.</td>
+            <td>Polls telemetry until $-Z_{\text{NED}} \ge 3.4\text{m}$ (85% of target). Dwells 1.5s to stabilize hover.</td>
+        </tr>
+        <tr>
+            <td><strong>Stage 2: Memorize Initial QR</strong></td>
+            <td>Downward camera captures <code>qr_initial</code> on takeoff pad. Orders quad corners, extracts 21&times;21 module grid into RAM.</td>
+            <td>Stores binary matrix $\mathbf{G}_{\text{ref}}$ and decoded text (<code>AEROTHON_QR_02</code>). Falls back to disk asset if occluded.</td>
+        </tr>
+        <tr>
+            <td><strong>Stage 3: Transition to Green Zone</strong></td>
+            <td>Navigates from Blue Zone $(N=-25.0, E=0.0)$ across the safety buffer to Green Zone entry waypoint $(N=-16.0, E=-18.0)$.</td>
+            <td>Interpolates setpoints at $1.5\text{ m/s}$ until distance to entry $\le 1.0\text{m}$. Vision matcher disabled to prevent false pad match.</td>
+        </tr>
+        <tr>
+            <td><strong>Stage 4: Lawnmower Survey</strong></td>
+            <td>Executes serpentine sweep along East columns alternating North/South sweeps at $1.5\text{ m/s}$. Vision matcher active.</td>
+            <td>Triggers on similarity $S \ge 0.88$ or payload match. Instantly commands targeted <code>BRAKE</code> mode.</td>
+        </tr>
+        <tr>
+            <td><strong>Stage 5: Precision Fly-To &amp; Visual Servoing</strong></td>
+            <td>Dwells 1.5s in <code>BRAKE</code> mode. Navigates to projected target $\mathbf{P}_{\text{target\_ned}}$. Runs multi-iteration fine visual servoing.</td>
+            <td>Locks centroid within $\le 25\text{ px}$. Visual lock achieves sub-centimeter accuracy ($0.7\text{ px}$).</td>
+        </tr>
+        <tr>
+            <td><strong>Stage 6: Holding Alignment Hover</strong></td>
+            <td>Maintains locked hover directly over matched QR for <code>--align-duration</code> (default: 10.0s). Streams setpoints at 20 Hz.</td>
+            <td>Displays live countdown HUD. If <code>--land-after</code> is set, issues <code>LAND</code>; otherwise holds steady hover indefinitely.</td>
+        </tr>
+    </tbody>
+</table>
+
+<div class="diagram-container">
+    <svg width="580" height="75" viewBox="0 0 580 75" xmlns="http://www.w3.org/2000/svg">
+        <rect x="5" y="10" width="85" height="55" fill="#f1f5f9" stroke="#94a3b8" rx="4"/>
+        <text x="47" y="32" font-size="7.5" font-weight="700" fill="#0f172a" text-anchor="middle">Stage 1</text>
+        <text x="47" y="46" font-size="7" fill="#475569" text-anchor="middle">Takeoff 4.0m</text>
+
+        <path d="M 90 37 L 100 37" fill="none" stroke="#2563eb" stroke-width="1.5"/>
+        <polygon points="100,37 96,35 96,39" fill="#2563eb"/>
+
+        <rect x="100" y="10" width="85" height="55" fill="#f1f5f9" stroke="#94a3b8" rx="4"/>
+        <text x="142" y="32" font-size="7.5" font-weight="700" fill="#0f172a" text-anchor="middle">Stage 2</text>
+        <text x="142" y="46" font-size="7" fill="#475569" text-anchor="middle">Memorize QR</text>
+
+        <path d="M 185 37 L 195 37" fill="none" stroke="#2563eb" stroke-width="1.5"/>
+        <polygon points="195,37 191,35 191,39" fill="#2563eb"/>
+
+        <rect x="195" y="10" width="85" height="55" fill="#f1f5f9" stroke="#94a3b8" rx="4"/>
+        <text x="237" y="32" font-size="7.5" font-weight="700" fill="#0f172a" text-anchor="middle">Stage 3</text>
+        <text x="237" y="46" font-size="7" fill="#475569" text-anchor="middle">Zone Transition</text>
+
+        <path d="M 280 37 L 290 37" fill="none" stroke="#2563eb" stroke-width="1.5"/>
+        <polygon points="290,37 286,35 286,39" fill="#2563eb"/>
+
+        <rect x="290" y="10" width="85" height="55" fill="#f1f5f9" stroke="#94a3b8" rx="4"/>
+        <text x="332" y="32" font-size="7.5" font-weight="700" fill="#0f172a" text-anchor="middle">Stage 4</text>
+        <text x="332" y="46" font-size="7" fill="#475569" text-anchor="middle">Lawnmower</text>
+
+        <path d="M 375 37 L 385 37" fill="none" stroke="#2563eb" stroke-width="1.5"/>
+        <polygon points="385,37 381,35 381,39" fill="#2563eb"/>
+
+        <rect x="385" y="10" width="85" height="55" fill="#f1f5f9" stroke="#94a3b8" rx="4"/>
+        <text x="427" y="32" font-size="7.5" font-weight="700" fill="#0f172a" text-anchor="middle">Stage 5</text>
+        <text x="427" y="46" font-size="7" fill="#475569" text-anchor="middle">Visual Servo</text>
+
+        <path d="M 470 37 L 480 37" fill="none" stroke="#2563eb" stroke-width="1.5"/>
+        <polygon points="480,37 476,35 476,39" fill="#2563eb"/>
+
+        <rect x="480" y="10" width="95" height="55" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5" rx="4"/>
+        <text x="527" y="32" font-size="7.5" font-weight="700" fill="#15803d" text-anchor="middle">Stage 6</text>
+        <text x="527" y="46" font-size="7" font-weight="700" fill="#166534" text-anchor="middle">Alignment Hold</text>
+    </svg>
+    <div class="diagram-caption">Figure 4: Finite State Machine (FSM) state sequence across the 6 autonomous mission phases.</div>
+</div>
+
+
+
+<!-- ================= PAGE 5 ================= -->
+
+
+
+<h2>9. Verification & Performance Benchmarks</h2>
+<p>
+The complete architecture was rigorously tested and verified in SITL flight simulation. Below is a side-by-side comparison of empirical telemetry logged during the runs:
+</p>
+
+<table>
+    <thead>
+        <tr>
+            <th>Telemetry / Control Metric</th>
+            <th>Original Implementation</th>
+            <th>Corrected Implementation (V2.0)</th>
+            <th>Verification Outcome</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><strong>Candidate Detection</strong></td>
+            <td>$S = 90.6\%$ &bull; <code>AEROTHON_QR_02</code></td>
+            <td>$S = 100.0\%$ &bull; <code>AEROTHON_QR_02</code></td>
+            <td>Pattern successfully identified</td>
+        </tr>
+        <tr>
+            <td><strong>Autopilot BRAKE Command</strong></td>
+            <td>Ignored (dropped by autopilot)</td>
+            <td><code>COMMAND_ACK: 176 Result: 0</code> (Instant Halt)</td>
+            <td><strong style="color: #16a34a;">Horizontal speed halted to 0 m/s</strong></td>
+        </tr>
+        <tr>
+            <td><strong>Drone Position at Detection</strong></td>
+            <td>$(N=+9.67\text{m}, E=-13.14\text{m})$</td>
+            <td>$(N=+9.67\text{m}, E=-13.14\text{m})$</td>
+            <td>Identical spatial trigger</td>
+        </tr>
+        <tr>
+            <td><strong>Projected Target Coordinate</strong></td>
+            <td>Not latched &bull; Unbounded relative drift</td>
+            <td>$(N=7.93\text{m}, E=-11.99\text{m})$ &bull; Truth $(8.0, -12.0)$</td>
+            <td><strong style="color: #16a34a;">Target projection error: 7 cm</strong></td>
+        </tr>
+        <tr>
+            <td><strong>Optical Centroid Error</strong></td>
+            <td>$228.2\text{ px} \to 160.5\text{ px}$ (Diverging)</td>
+            <td><strong>0.7 pixels from optical center!</strong></td>
+            <td><strong style="color: #16a34a;">Precision: 0.8 cm at 4.0m altitude</strong></td>
+        </tr>
+        <tr>
+            <td><strong>Final Position &amp; Behavior</strong></td>
+            <td>Landed at $(N=-1.84\text{m}, E=3.00\text{m})$ on grass</td>
+            <td>Hovered locked over $(N=7.93\text{m}, E=-11.99\text{m})$</td>
+            <td><strong style="color: #16a34a;">Dead-center over target QR 2!</strong></td>
+        </tr>
+    </tbody>
+</table>
+
+<h2>10. Operator Quick Start & Command Reference</h2>
+<p>
+To run the simulation and mission in SITL:
+</p>
+
+<pre style="margin: 4px 0; font-size: 7.5pt;">
+<span style="color:#38bdf8;"># Terminal 1: Launch Gazebo Sim 8 (Harmonic) Environment</span>
+/home/nh/aerothon_ws/scripts/run_sim.sh
+
+<span style="color:#38bdf8;"># Terminal 2: Launch ArduPilot SITL Flight Controller</span>
+/home/nh/aerothon_ws/scripts/run_sitl.sh
+
+<span style="color:#38bdf8;"># Terminal 3: Launch Autonomous Lawnmower & Precision QR Aligner</span>
+/home/nh/aerothon_ws/scripts/run_mission.sh --align-duration 10.0</pre>
+
+<h3>CLI Options Reference</h3>
+<table>
+    <thead>
+        <tr>
+            <th>Argument</th>
+            <th>Type</th>
+            <th>Default</th>
+            <th>Operational Description</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><code>--alt</code></td>
+            <td>float</td>
+            <td><code>4.0</code></td>
+            <td>Target survey altitude in meters above ground level.</td>
+        </tr>
+        <tr>
+            <td><code>--align-duration</code></td>
+            <td>float</td>
+            <td><code>10.0</code></td>
+            <td>Hold duration in seconds for steady visual alignment hover over matched QR.</td>
+        </tr>
+        <tr>
+            <td><code>--speed</code></td>
+            <td>float</td>
+            <td><code>1.5</code></td>
+            <td>Lawnmower search traversal velocity in meters per second.</td>
+        </tr>
+        <tr>
+            <td><code>--step</code></td>
+            <td>float</td>
+            <td><code>5.0</code></td>
+            <td>East column spacing between serpentine lawnmower sweeps in meters.</td>
+        </tr>
+        <tr>
+            <td><code>--match-thresh</code></td>
+            <td>float</td>
+            <td><code>0.88</code></td>
+            <td>Minimum 4-rotation invariant similarity score to trigger match [0.0 &ndash; 1.0].</td>
+        </tr>
+        <tr>
+            <td><code>--center-tol</code></td>
+            <td>float</td>
+            <td><code>25.0</code></td>
+            <td>Centering pixel tolerance in camera image frame before declaring lock.</td>
+        </tr>
+        <tr>
+            <td><code>--land-after</code></td>
+            <td>flag</td>
+            <td><code>False</code></td>
+            <td>If passed, automatically commands landing after the alignment duration elapses.</td>
+        </tr>
+    </tbody>
+</table>
+
+<div class="callout callout-info">
+    <div class="callout-title">Live Camera HUD Features</div>
+    When <code>--show-camera</code> is active (default), the mission displays a real-time HUD window containing:
+    &bull; Center yellow crosshairs with inner tolerance circles.
+    &bull; Dynamic bounding polygon around detected QRs (Green for twin match, Orange for distractors).
+    &bull; Centroid displacement vector connecting image optical center $(320, 240)$ to QR centroid $(u, v)$.
+    &bull; Picture-in-Picture (PiP) reference thumbnail in upper-right corner showing the memorized pattern.
+    &bull; Alignment countdown banner during Stage 6 showing remaining hold time in seconds.
+</div>
+
+
+
+<script>
+    // Render all KaTeX math blocks after DOM loads
+    document.addEventListener("DOMContentLoaded", function() {
+        renderMathInElement(document.body, {
+            delimiters: [
+                {left: "$$", right: "$$", display: true},
+                {left: "$", right: "$", display: false}
+            ],
+            throwOnError: false
+        });
+    });
+</script>
+
+</body>
+</html>

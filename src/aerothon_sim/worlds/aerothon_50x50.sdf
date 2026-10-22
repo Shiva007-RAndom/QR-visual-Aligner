@@ -1,0 +1,166 @@
+<?xml version="1.0" ?>
+<sdf version="1.9">
+  <world name="aerothon_50x50">
+    <physics name="1ms" type="ignore">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <!-- Essential Gazebo Sim Systems -->
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
+    <plugin filename="gz-sim-navsat-system" name="gz::sim::systems::NavSat"/>
+
+    <!-- Environment Scene and Sky -->
+    <scene>
+      <ambient>0.8 0.8 0.8 1.0</ambient>
+      <background>0.7 0.85 1.0 1.0</background>
+      <sky></sky>
+    </scene>
+
+    <!-- GPS / Spherical Coordinates aligned with ArduPilot SITL home -->
+    <spherical_coordinates>
+      <latitude_deg>-35.363262</latitude_deg>
+      <longitude_deg>149.165237</longitude_deg>
+      <elevation>584</elevation>
+      <heading_deg>0</heading_deg>
+      <surface_model>EARTH_WGS84</surface_model>
+    </spherical_coordinates>
+
+    <!-- Directional Sun Light -->
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 40 0 0 0</pose>
+      <diffuse>0.9 0.9 0.9 1</diffuse>
+      <specular>0.3 0.3 0.3 1</specular>
+      <direction>-0.4 0.2 -1.0</direction>
+    </light>
+
+    <!-- 1. BLUE TAKEOFF & MEMORIZING ZONE (50m x 10m: X in [-25, 25], Y in [-30, -20]) -->
+    <model name="blue_takeoff_zone_50x10">
+      <static>true</static>
+      <link name="blue_link">
+        <collision name="collision">
+          <pose>0 -25 -0.05 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>50 10 0.1</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="blue_visual">
+          <pose>0 -25 0 0 0 0</pose>
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>50 10</size>
+            </plane>
+          </geometry>
+          <material>
+            <ambient>0.10 0.25 0.70 1</ambient>
+            <diffuse>0.15 0.35 0.85 1</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Takeoff Pad (2.5m x 2.5m at X=0, Y=-25) in Blue Zone -->
+    <model name="takeoff_pad">
+      <static>true</static>
+      <link name="pad_link">
+        <visual name="pad_surface">
+          <pose>0 -25 0.001 0 0 0</pose>
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>2.5 2.5</size>
+            </plane>
+          </geometry>
+          <material>
+            <ambient>0.25 0.25 0.30 1</ambient>
+            <diffuse>0.30 0.30 0.38 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Initial Reference QR directly under takeoff point in Blue Zone (X=0, Y=-25) -->
+    <include>
+      <uri>model://qr_initial</uri>
+      <name>qr_initial</name>
+      <pose>0 -25 0.002 0 0 0</pose>
+    </include>
+
+    <!-- 2. GREEN SEARCH ZONE (50m x 40m: X in [-25, 25], Y in [-20, 20]) -->
+    <model name="green_search_zone_50x40">
+      <static>true</static>
+      <link name="lawn_link">
+        <collision name="collision">
+          <pose>0 0 -0.05 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>50 40 0.1</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="grass_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>50 40</size>
+            </plane>
+          </geometry>
+          <material>
+            <ambient>0.15 0.50 0.15 1</ambient>
+            <diffuse>0.20 0.60 0.20 1</diffuse>
+            <specular>0.05 0.05 0.05 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- 3. 4 Search Area QR Code Tiles (2m x 2m) placed inside the Green Search Zone -->
+    <!-- Tile 1 (AEROTHON_QR_01) -->
+    <include>
+      <uri>model://qr_tile_1</uri>
+      <name>qr_tile_1</name>
+      <pose>12.0 10.0 0.002 0 0 0</pose>
+    </include>
+
+    <!-- Tile 2 (AEROTHON_QR_02) [THE TARGET MATCH!] -->
+    <include>
+      <uri>model://qr_tile_2</uri>
+      <name>qr_tile_2</name>
+      <pose>-12.0 8.0 0.002 0 0 0</pose>
+    </include>
+
+    <!-- Tile 3 (AEROTHON_QR_03) -->
+    <include>
+      <uri>model://qr_tile_3</uri>
+      <name>qr_tile_3</name>
+      <pose>14.0 -8.0 0.002 0 0 0</pose>
+    </include>
+
+    <!-- Tile 4 (AEROTHON_QR_04) -->
+    <include>
+      <uri>model://qr_tile_4</uri>
+      <name>qr_tile_4</name>
+      <pose>-10.0 -10.0 0.002 0 0 0</pose>
+    </include>
+
+    <!-- ArduPilot Quadcopter Drone with Downward Camera starting on Takeoff Pad in Blue Zone -->
+    <include>
+      <uri>model://iris_with_ardupilot_camera</uri>
+      <name>iris_with_ardupilot_camera</name>
+      <pose degrees="true">0 -25 0.195 0 0 90</pose>
+    </include>
+
+  </world>
+</sdf>
