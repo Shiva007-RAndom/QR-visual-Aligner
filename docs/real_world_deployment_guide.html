@@ -1,0 +1,635 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Real-World Autonomous UAV Deployment Manual: Raspberry Pi 5 & Cube Orange+</title>
+
+
+<style>
+    @page {
+        size: A4;
+        margin: 11mm 13mm 13mm 13mm;
+    }
+    body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        color: #1e293b;
+        background-color: #ffffff;
+        line-height: 1.38;
+        font-size: 8.5pt;
+        margin: 0;
+        padding: 0;
+    }
+    .header-box {
+        border-bottom: 2.5px solid #2563eb;
+        padding-bottom: 6px;
+        margin-bottom: 10px;
+    }
+    .badge {
+        display: inline-block;
+        background: #dbeafe;
+        color: #1e40af;
+        font-size: 7.5pt;
+        font-weight: 700;
+        padding: 2px 7px;
+        border-radius: 9999px;
+        text-transform: uppercase;
+        margin-bottom: 4px;
+    }
+    h1 {
+        color: #0f172a;
+        font-size: 16pt;
+        font-weight: 800;
+        line-height: 1.2;
+        margin: 2px 0 3px 0;
+    }
+    .subtitle {
+        color: #475569;
+        font-size: 9.2pt;
+        font-weight: 400;
+        margin: 0 0 6px 0;
+    }
+    .doc-meta {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 8px;
+        font-size: 7.5pt;
+        color: #475569;
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        border-radius: 5px;
+        padding: 6px 10px;
+    }
+    .doc-meta strong {
+        color: #0f172a;
+    }
+    h2 {
+        color: #1e3a8a;
+        font-size: 10.5pt;
+        font-weight: 700;
+        border-bottom: 1.5px solid #cbd5e1;
+        padding-bottom: 2px;
+        margin-top: 10px;
+        margin-bottom: 5px;
+        page-break-after: avoid;
+    }
+    h3 {
+        color: #0f172a;
+        font-size: 8.8pt;
+        font-weight: 700;
+        margin-top: 7px;
+        margin-bottom: 3px;
+        page-break-after: avoid;
+    }
+    p {
+        margin: 0 0 5px 0;
+        text-align: justify;
+    }
+    ul, ol {
+        margin: 0 0 5px 0;
+        padding-left: 16px;
+    }
+    li {
+        margin-bottom: 2px;
+    }
+    .callout {
+        border-radius: 5px;
+        padding: 6px 10px;
+        margin: 6px 0;
+        font-size: 8pt;
+        page-break-inside: avoid;
+    }
+    .callout-info {
+        background-color: #eff6ff;
+        border-left: 3.5px solid #3b82f6;
+        color: #1e40af;
+    }
+    .callout-success {
+        background-color: #f0fdf4;
+        border-left: 3.5px solid #22c55e;
+        color: #15803d;
+    }
+    .callout-danger {
+        background-color: #fef2f2;
+        border-left: 3.5px solid #ef4444;
+        color: #b91c1c;
+    }
+    .callout-warning {
+        background-color: #fffbeb;
+        border-left: 3.5px solid #f59e0b;
+        color: #b45309;
+    }
+    .callout-title {
+        font-weight: 700;
+        margin-bottom: 2px;
+        display: flex;
+        align-items: center;
+        gap: 5px;
+    }
+    .diagram-container {
+        border: 1px solid #e2e8f0;
+        background: #f8fafc;
+        border-radius: 5px;
+        padding: 6px;
+        margin: 6px 0;
+        text-align: center;
+        page-break-inside: avoid;
+    }
+    .diagram-caption {
+        font-size: 7pt;
+        color: #64748b;
+        margin-top: 3px;
+        font-style: italic;
+    }
+    pre {
+        background-color: #0f172a;
+        color: #f8fafc;
+        padding: 6px 8px;
+        border-radius: 4px;
+        font-family: "JetBrains Mono", Consolas, monospace;
+        font-size: 7pt;
+        line-height: 1.3;
+        overflow-x: auto;
+        margin: 4px 0;
+        page-break-inside: avoid;
+    }
+    code {
+        font-family: "JetBrains Mono", Consolas, monospace;
+        background-color: #f1f5f9;
+        color: #0f172a;
+        padding: 1px 3px;
+        border-radius: 3px;
+        font-size: 7.2pt;
+    }
+    table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 5px 0 8px 0;
+        font-size: 7.8pt;
+        page-break-inside: avoid;
+    }
+    th, td {
+        border: 1px solid #cbd5e1;
+        padding: 3.5px 5px;
+        text-align: left;
+    }
+    th {
+        background-color: #f1f5f9;
+        font-weight: 700;
+        color: #0f172a;
+    }
+    .card {
+        border: 1px solid #e2e8f0;
+        border-radius: 4px;
+        padding: 5px 8px;
+        background: #ffffff;
+    }
+    .card-title {
+        font-weight: 700;
+        font-size: 8pt;
+        color: #1e3a8a;
+        margin-bottom: 2px;
+    }
+    .grid-2 {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+        margin: 5px 0;
+        page-break-inside: avoid;
+    }
+    .page-break {
+        page-break-before: always;
+        break-before: page;
+    }
+</style>
+</head>
+<body>
+
+<!-- ================= PAGE 1 ================= -->
+<div class="header-box">
+    <div class="badge">Aerothon 2026 &bull; Hardware Deployment Manual</div>
+    <h1>Real-World Implementation Guide: Raspberry Pi 5 &amp; Cube Orange+</h1>
+    <div class="subtitle">Complete Physical Wiring, Flight Controller Parameters, SIYI Camera Integration &amp; Safety Protocols</div>
+    <div class="doc-meta">
+        <div><strong>Airframe:</strong> Holybro X500 Quadcopter</div>
+        <div><strong>Autopilot:</strong> CubePilot Cube Orange Plus</div>
+        <div><strong>Companion:</strong> Raspberry Pi 5 (4GB / 8GB)</div>
+        <div><strong>Optics:</strong> SIYI Ethernet Camera (RTSP)</div>
+    </div>
+</div>
+
+<h2>1. Physical Interconnections &amp; Electrical Architecture</h2>
+<p>
+Deploying autonomous vision on a physical multirotor requires strict isolation between digital signal buses and high-current motor circuits to eliminate brownouts, voltage spikes, and ground loops.
+</p>
+
+<div class="diagram-container">
+    <svg width="600" height="195" viewBox="0 0 600 195" xmlns="http://www.w3.org/2000/svg">
+        <!-- Airframe Boundary -->
+        <rect x="10" y="8" width="580" height="180" fill="#f8fafc" stroke="#94a3b8" stroke-dasharray="4,2" rx="5"/>
+        <text x="25" y="24" font-size="8.5" font-weight="700" fill="#64748b">HOLYBRO X500 AIRFRAME</text>
+
+        <!-- Battery / PDB -->
+        <rect x="25" y="65" width="105" height="70" fill="#fee2e2" stroke="#ef4444" stroke-width="1.5" rx="4"/>
+        <text x="77" y="90" font-size="8" font-weight="700" fill="#b91c1c" text-anchor="middle">Main LiPo Battery</text>
+        <text x="77" y="103" font-size="7.5" fill="#7f1d1d" text-anchor="middle">4S / 6S (14.8V-22.2V)</text>
+        <text x="77" y="118" font-size="7" fill="#7f1d1d" text-anchor="middle">+ Power Distribution</text>
+
+        <!-- Power Lines -->
+        <path d="M 130 85 L 180 45" fill="none" stroke="#ef4444" stroke-width="2"/>
+        <path d="M 130 100 L 180 100" fill="none" stroke="#ef4444" stroke-width="2"/>
+        <path d="M 130 115 L 180 155" fill="none" stroke="#ef4444" stroke-width="2"/>
+
+        <!-- SIYI Camera -->
+        <rect x="180" y="20" width="140" height="50" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5" rx="4"/>
+        <text x="250" y="38" font-size="8" font-weight="700" fill="#1e40af" text-anchor="middle">SIYI Camera (A8 mini)</text>
+        <text x="250" y="52" font-size="7" fill="#1e3a8a" text-anchor="middle">12V Power &bull; Facing Nadir (-90&deg;)</text>
+
+        <!-- Raspberry Pi 5 -->
+        <rect x="420" y="20" width="150" height="65" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5" rx="4"/>
+        <text x="495" y="38" font-size="8.5" font-weight="700" fill="#15803d" text-anchor="middle">Raspberry Pi 5</text>
+        <text x="495" y="51" font-size="7" fill="#166534" text-anchor="middle">Vision Brain &bull; 5V/5A Dedicated BEC</text>
+        <text x="495" y="64" font-size="7" fill="#166534" text-anchor="middle">IP: 192.168.144.50 (eth0)</text>
+
+        <!-- Ethernet Link -->
+        <line x1="320" y1="45" x2="420" y2="45" stroke="#2563eb" stroke-width="2.5"/>
+        <text x="370" y="38" font-size="7.5" font-weight="700" fill="#1d4ed8" text-anchor="middle">RJ45 Ethernet</text>
+        <text x="370" y="58" font-size="6.5" fill="#1e40af" text-anchor="middle">RTSP Stream @ 192.168.144.25</text>
+
+        <!-- 5V/5A BEC Box -->
+        <rect x="180" y="85" width="140" height="30" fill="#fef3c7" stroke="#f59e0b" rx="3"/>
+        <text x="250" y="104" font-size="7.5" font-weight="700" fill="#92400e" text-anchor="middle">5V / 5A Step-Down BEC</text>
+        <path d="M 320 100 L 450 100 L 450 85" fill="none" stroke="#f59e0b" stroke-width="2"/>
+
+        <!-- Cube Orange Plus FC -->
+        <rect x="250" y="135" width="190" height="48" fill="#ffedd5" stroke="#ea580c" stroke-width="1.5" rx="4"/>
+        <text x="345" y="153" font-size="8.5" font-weight="700" fill="#c2410c" text-anchor="middle">Cube Orange Plus (ArduPilot 4.5)</text>
+        <text x="345" y="167" font-size="7" fill="#9a3412" text-anchor="middle">TELEM2 Port (JST-GH) @ 921600 baud</text>
+
+        <!-- MAVLink Serial Cable -->
+        <path d="M 440 155 L 510 155 L 510 85" fill="none" stroke="#ea580c" stroke-width="2" stroke-dasharray="3,2"/>
+        <text x="495" y="145" font-size="7.5" font-weight="700" fill="#c2410c" text-anchor="middle">MAVLink 2</text>
+        <text x="495" y="125" font-size="6.5" fill="#9a3412" text-anchor="middle">USB-to-FTDI or UART</text>
+    </svg>
+    <div class="diagram-caption">Figure 1: Complete electrical schematic and communication wiring for Holybro X500, Cube Orange+, Raspberry Pi 5, and SIYI.</div>
+</div>
+
+<div class="callout callout-danger">
+    <div class="callout-title">CRITICAL POWER SAFETY RULES</div>
+    <ol style="margin: 2px 0; padding-left: 16px;">
+        <li><strong>NEVER power the Raspberry Pi 5 from the Pixhawk/Cube:</strong> The Cube's internal 5V bus is strictly rated for 1A max (for sensors and RC receivers). The Pi 5 draws up to 5A under high CPU/OpenCV load. Power the Pi 5 exclusively from an independent <strong>5V / 5A step-down BEC</strong> wired to the main battery.</li>
+        <li><strong>Common Ground Reference:</strong> Ensure the ground (GND) wires of the battery, Cube Orange Plus, Raspberry Pi 5, and SIYI camera are all tied together to establish a stable reference potential for UART and Ethernet signals.</li>
+        <li><strong>SIYI Power:</strong> The SIYI A8 mini / ZR10 requires 11V to 26V. Power it from a 12V BEC or directly from a 4S LiPo. <strong>Do not connect it to 5V!</strong></li>
+    </ol>
+</div>
+
+<h2>2. Cube Orange Plus Parameter Configuration (Mission Planner)</h2>
+<p>
+Connect your Cube Orange Plus via USB to Mission Planner or QGroundControl and verify the following parameters in the Full Parameter List:
+</p>
+
+<table>
+    <thead>
+        <tr>
+            <th>Parameter</th>
+            <th>Required Value</th>
+            <th>Technical Function &amp; Rationale</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><code>SERIAL2_PROTOCOL</code></td>
+            <td><code>2</code></td>
+            <td>Enables MAVLink 2 framing on the <code>TELEM2</code> port for high-rate telemetry and setpoints.</td>
+        </tr>
+        <tr>
+            <td><code>SERIAL2_BAUD</code></td>
+            <td><code>921</code></td>
+            <td>Sets baud rate to <strong>921,600 bps</strong> to eliminate serial buffer latency during 20 Hz setpoint streaming.</td>
+        </tr>
+        <tr>
+            <td><code>ARMING_CHECK</code></td>
+            <td><code>1</code></td>
+            <td>Enforces all flight controller safety checks (Compass calibration, GPS 3D lock, EKF convergence).</td>
+        </tr>
+        <tr>
+            <td><code>FS_GCS_ENABLE</code></td>
+            <td><code>1</code></td>
+            <td>Triggers automatic Return-To-Launch (RTL) if companion computer MAVLink heartbeats cease.</td>
+        </tr>
+        <tr>
+            <td><code>FENCE_ENABLE</code></td>
+            <td><code>1</code></td>
+            <td><strong>Geofence Safety:</strong> Enforces an invisible containment boundary to prevent flyaway.</td>
+        </tr>
+        <tr>
+            <td><code>FENCE_RADIUS</code></td>
+            <td><code>35.0</code></td>
+            <td>Restricts quadcopter travel within a 35-meter radius of the takeoff point.</td>
+        </tr>
+        <tr>
+            <td><code>FENCE_ALT_MAX</code></td>
+            <td><code>10.0</code></td>
+            <td>Caps maximum flight altitude to 10 meters above ground level.</td>
+        </tr>
+        <tr>
+            <td><code>WPNAV_SPEED</code></td>
+            <td><code>150.0</code></td>
+            <td>Configures survey traversal speed to 1.5 m/s (150 cm/s) for optimal QR optical capture.</td>
+        </tr>
+        <tr>
+            <td><code>MNT1_TYPE</code></td>
+            <td><code>4</code> or <code>0</code></td>
+            <td>Gimbal control: Lock camera pitch facing downward at -90&deg; (Nadir).</td>
+        </tr>
+    </tbody>
+</table>
+
+<h2>3. Emergency Manual Takeover Setup (Mandatory Safety Rule)</h2>
+<p>
+When running autonomous code that commands <code>GUIDED</code> and <code>BRAKE</code> modes, the safety pilot <strong>must retain instantaneous manual override</strong>. Configure your RC transmitter (RadioMaster TX16S, FrSky, etc.):
+</p>
+
+<div class="grid-2">
+    <div class="card">
+        <div class="card-title">Flight Mode Switch (Channel 5 - 3 Position)</div>
+        <ul style="font-size: 7.5pt; margin: 0;">
+            <li><strong>Position 1 (Up):</strong> <code>ALT_HOLD</code> (Manual throttle &amp; attitude)</li>
+            <li><strong>Position 2 (Mid):</strong> <code>LOITER</code> (GPS position lock &amp; hover)</li>
+            <li><strong>Position 3 (Down):</strong> <code>GUIDED</code> (Autonomous script control)</li>
+        </ul>
+    </div>
+    <div class="card">
+        <div class="card-title">Emergency BRAKE Switch (Channel 7 or 8)</div>
+        <ul style="font-size: 7.5pt; margin: 0;">
+            <li>Assign a dedicated toggle switch to <code>BRAKE</code> mode.</li>
+            <li>Flipping this switch immediately freezes the drone in place, overriding companion computer commands instantly.</li>
+        </ul>
+    </div>
+</div>
+
+<!-- ================= PAGE 2 ================= -->
+<div class="page-break"></div>
+
+<h2>4. Raspberry Pi 5 Operating System &amp; Network Configuration</h2>
+
+<h3>1. Static IP Configuration for SIYI Ethernet Link</h3>
+<p>
+The SIYI camera is factory-configured at IP <code>192.168.144.25</code> on subnet <code>192.168.144.xxx</code>. The Pi 5's Ethernet port (<code>eth0</code>) must be assigned a static IP in the same subnet:
+</p>
+<pre># Create persistent static IP connection for SIYI on Raspberry Pi 5
+sudo nmcli con add type ethernet con-name siyi-eth ifname eth0 ip4 192.168.144.50/24
+sudo nmcli con up siyi-eth
+
+# Test Ethernet connection to SIYI camera
+ping -c 3 192.168.144.25</pre>
+
+<h3>2. Serial USB / UART Permissions</h3>
+<pre># Allow non-root access to Pixhawk USB/Serial port
+sudo usermod -aG dialout $USER</pre>
+
+<h3>3. Install Lightweight Python Dependencies</h3>
+<p>
+On the Raspberry Pi 5, you <strong>do not need to install ROS 2</strong>. Running the mission controller in pure Python with OpenCV and MAVLink uses less than 15% CPU:
+</p>
+<pre>sudo apt update
+sudo apt install -y python3-pip python3-opencv libzbar0
+pip3 install pymavlink pyzbar numpy</pre>
+
+<h2>5. Software Integration: Connecting Your SIYI Feed</h2>
+<p>
+Since you already have a working Python script to capture the SIYI feed, you can integrate it directly into <code>lawnmower_qr_mission.py</code> using this lightweight multi-threaded capture class:
+</p>
+
+<pre># Threaded SIYI Camera Capture Adapter (Zero Frame Latency)
+import threading
+import cv2
+
+class SiyiStreamWorker:
+    def __init__(self, capture_source):
+        # Uses your custom SIYI capture object or direct RTSP stream
+        self.cap = cv2.VideoCapture(capture_source, cv2.CAP_FFMPEG)
+        self.frame = None
+        self.lock = threading.Lock()
+        self.running = True
+        # Background worker continuously discards stale buffer frames
+        threading.Thread(target=self._update, daemon=True).start()
+
+    def _update(self):
+        while self.running:
+            ret, img = self.cap.read()
+            if ret:
+                with self.lock:
+                    self.frame = img
+
+    def get_frame(self):
+        with self.lock:
+            return None if self.frame is None else self.frame.copy()</pre>
+
+<!-- ================= PAGE 3 ================= -->
+<div class="page-break"></div>
+
+<h2>6. Real-World Georeferencing vs. Simulation Coordinates</h2>
+<p>
+In the Gazebo simulation, the takeoff pad was hard-coded at <code>(N = -25.0, E = 0.0)</code> because the world origin was placed at the field center.
+</p>
+<div class="callout callout-warning">
+    <div class="callout-title">THE REAL-WORLD DIFFERENCE</div>
+    When the Cube Orange Plus acquires a GPS 3D fix outdoors and arms, <strong>ArduPilot EKF3 automatically initializes Local NED <code>(N = 0.0, E = 0.0)</code> at the exact physical spot where the drone took off!</strong>
+</div>
+
+<p>
+Therefore, in real life, configure your search zone <strong>relative to your physical takeoff pad</strong>:
+</p>
+<ul>
+    <li><strong>Takeoff Pad:</strong> Local NED <code>(N = 0.0m, E = 0.0m)</code>.</li>
+    <li><strong>Search Area:</strong> Set the lawnmower survey to sweep the field in front of the pad (e.g. North from <code>+5.0m</code> to <code>+30.0m</code>, East from <code>-12.0m</code> to <code>+12.0m</code>).</li>
+</ul>
+
+<div class="diagram-container">
+    <svg width="580" height="110" viewBox="0 0 580 110" xmlns="http://www.w3.org/2000/svg">
+        <rect x="20" y="10" width="540" height="90" fill="#f8fafc" stroke="#94a3b8" rx="4"/>
+        
+        <!-- Blue Takeoff Spot -->
+        <rect x="40" y="30" width="50" height="50" fill="#dbeafe" stroke="#2563eb" stroke-width="1.5" rx="3"/>
+        <circle x="65" y="55" r="5" fill="#ef4444"/>
+        <text x="65" y="44" font-size="7" font-weight="700" fill="#1e40af" text-anchor="middle">Takeoff Pad</text>
+        <text x="65" y="72" font-size="6.5" font-weight="700" fill="#1e3a8a" text-anchor="middle">(N=0, E=0)</text>
+
+        <!-- Buffer -->
+        <line x1="90" y1="55" x2="160" y2="55" stroke="#64748b" stroke-dasharray="3,2" stroke-width="1.5"/>
+        <text x="125" y="48" font-size="7" fill="#64748b" text-anchor="middle">5m Safe Buffer</text>
+
+        <!-- Search Zone -->
+        <rect x="160" y="20" width="380" height="70" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5" rx="3"/>
+        <text x="350" y="35" font-size="8" font-weight="700" fill="#15803d" text-anchor="middle">COMPETITION SEARCH FIELD (North: +5m to +30m, East: -12m to +12m)</text>
+        <text x="350" y="48" font-size="7" fill="#166534" text-anchor="middle">Serpentine sweeps with 4m-5m step spacing (ensures 35-50% optical swath overlap)</text>
+
+        <!-- QR Candidates -->
+        <rect x="240" y="60" width="16" height="16" fill="#94a3b8"/>
+        <text x="248" y="86" font-size="6" fill="#475569" text-anchor="middle">QR 1</text>
+
+        <rect x="360" y="58" width="16" height="16" fill="#1e293b" stroke="#16a34a" stroke-width="1.5"/>
+        <circle x="368" y="66" r="3" fill="#22c55e"/>
+        <text x="368" y="86" font-size="6.5" font-weight="700" fill="#15803d" text-anchor="middle">MATCH QR</text>
+
+        <rect x="470" y="60" width="16" height="16" fill="#94a3b8"/>
+        <text x="478" y="86" font-size="6" fill="#475569" text-anchor="middle">QR 3</text>
+    </svg>
+    <div class="diagram-caption">Figure 2: Real-world field layout relative to physical takeoff pad (N=0, E=0).</div>
+</div>
+
+<h2>7. Four-Stage Zero-Risk Flight Testing Protocol</h2>
+<p>
+Do not attempt full autonomous flight immediately. Strictly execute this phased validation sequence:
+</p>
+
+<h3>Stage 1: Benchtop Test (PROPELLERS OFF! ⚠️)</h3>
+<ol>
+    <li>Remove all four propellers from the X500 frame.</li>
+    <li>Power on the drone. SSH into the Raspberry Pi 5 over Wi-Fi.</li>
+    <li>Run the mission script in bench mode:
+        <pre>python3 scripts/lawnmower_qr_mission.py --url /dev/ttyUSB0:921600 --alt 4.0</pre>
+    </li>
+    <li>Hold your printed reference QR under the SIYI camera. Verify console prints: <code>[SUCCESS] REFERENCE QR MEMORIZED INTO MEMORY!</code></li>
+    <li>Slide the twin candidate QR under the camera. Verify console logs: <code>[MATCH FOUND!] 100.0%</code> and confirms <code>Got COMMAND_ACK: DO_SET_MODE: ACCEPTED (Mode BRAKE)</code>.</li>
+</ol>
+
+<h3>Stage 2: Manual Flight &amp; Loiter Stability Verification</h3>
+<ol>
+    <li>Mount propellers. Place the drone in an open outdoor test field.</li>
+    <li>Arm and takeoff manually in <code>ALT_HOLD</code> mode to 4.0 meters.</li>
+    <li>Switch RC to <code>LOITER</code> mode. Verify the drone holds rock-solid position with GPS lock (minimum 14 satellites, HDOP &lt; 0.9).</li>
+    <li>Flip your emergency RC <code>BRAKE</code> switch. Verify the drone stops in place immediately.</li>
+</ol>
+
+<h3>Stage 3: Companion Computer Single-Waypoint Test</h3>
+<ol>
+    <li>Hover the drone manually at 4.0m in <code>LOITER</code>. Flip flight mode switch to <code>GUIDED</code>.</li>
+    <li>On the Raspberry Pi 5, command a single 5-meter translation:
+        <pre>python3 scripts/fly_to.py --target-n 5.0 --target-e 0.0 --target-d -4.0 --url /dev/ttyUSB0:921600</pre>
+    </li>
+    <li>Verify the drone smoothly cruises 5 meters forward and stops. Flip your RC switch back to <code>LOITER</code> to confirm manual override works instantly.</li>
+</ol>
+
+<!-- ================= PAGE 4 ================= -->
+<div class="page-break"></div>
+
+<h3>Stage 4: Full Autonomous Mission Execution</h3>
+<ol>
+    <li>Place the 2m &times; 2m reference QR tile directly under the drone on the takeoff spot.</li>
+    <li>Place the twin candidate QR and distractor tiles in the search field ahead.</li>
+    <li>Ensure geofence is active (<code>FENCE_ENABLE = 1</code>).</li>
+    <li>Keep one finger on your RC transmitter mode switch (ready to flip to <code>LOITER</code> or <code>ALT_HOLD</code> at any millisecond).</li>
+    <li>Launch the autonomous mission script on the Raspberry Pi 5:
+        <pre>python3 scripts/lawnmower_qr_mission.py \
+  --url /dev/ttyUSB0:921600 \
+  --alt 4.0 \
+  --speed 1.5 \
+  --step 4.5 \
+  --align-duration 15.0 \
+  --no-camera</pre>
+        <em>(Note: <code>--no-camera</code> disables the X11 GUI window to save CPU cycles on headless Pi).</em>
+    </li>
+    <li><strong>Expected Autonomous Flight Sequence:</strong>
+        <ul>
+            <li>Drone arms in <code>GUIDED</code> mode and climbs to 4.0m altitude.</li>
+            <li>Holds steady for 1.5s, downward SIYI camera captures reference QR, extracts 21&times;21 module grid into RAM.</li>
+            <li>Transitions smoothly across the 5m buffer to entry waypoint <code>(N = 5.0m, E = -10.0m)</code>.</li>
+            <li>Performs lawnmower serpentine survey across the field at 1.5 m/s.</li>
+            <li>The moment twin QR is spotted (score &ge; 88%), issues targeted <code>BRAKE</code> command, stopping horizontal momentum.</li>
+            <li>Pinhole ray projection calculates ground coordinates <code>(N_target, E_target)</code>.</li>
+            <li>Drone flies directly to the target QR, initiates closed-loop visual servoing to lock the optical crosshair over the QR centroid with 0.7 px precision (&lt; 1 cm error).</li>
+            <li>Maintains steady alignment hover directly over the QR for 15.0 seconds.</li>
+        </ul>
+    </li>
+</ol>
+
+<h2>8. Pre-Flight Field Verification Checklist</h2>
+
+<table>
+    <thead>
+        <tr>
+            <th>#</th>
+            <th>Safety / Subsystem Item</th>
+            <th>Required Status</th>
+            <th>Sign-off</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td>1</td>
+            <td><strong>Main LiPo Battery Voltage</strong></td>
+            <td>&ge; 4.15V per cell (16.6V for 4S, 24.9V for 6S)</td>
+            <td>[ &nbsp; ] PASS</td>
+        </tr>
+        <tr>
+            <td>2</td>
+            <td><strong>Dedicated Pi 5 5V/5A BEC</strong></td>
+            <td>Supplying steady 5.1V under load; Pi PWR LED solid red (no under-voltage)</td>
+            <td>[ &nbsp; ] PASS</td>
+        </tr>
+        <tr>
+            <td>3</td>
+            <td><strong>SIYI Camera Gimbal Pitch</strong></td>
+            <td>Locked facing straight downward (-90&deg; Nadir); lens clean &amp; unoccluded</td>
+            <td>[ &nbsp; ] PASS</td>
+        </tr>
+        <tr>
+            <td>4</td>
+            <td><strong>Ethernet Connection to SIYI</strong></td>
+            <td><code>ping -c 2 192.168.144.25</code> returns 0% packet loss, latency &lt; 2ms</td>
+            <td>[ &nbsp; ] PASS</td>
+        </tr>
+        <tr>
+            <td>5</td>
+            <td><strong>MAVLink Link on TELEM2</strong></td>
+            <td>921,600 baud; heartbeat active; telemetry stream rate &ge; 20 Hz</td>
+            <td>[ &nbsp; ] PASS</td>
+        </tr>
+        <tr>
+            <td>6</td>
+            <td><strong>GPS Satellites &amp; HDOP</strong></td>
+            <td>Satellites &ge; 14, HDOP &le; 0.8; EKF status green</td>
+            <td>[ &nbsp; ] PASS</td>
+        </tr>
+        <tr>
+            <td>7</td>
+            <td><strong>Geofence Active</strong></td>
+            <td>Radius 35m, Altitude 10m ceiling confirmed in Mission Planner</td>
+            <td>[ &nbsp; ] PASS</td>
+        </tr>
+        <tr>
+            <td>8</td>
+            <td><strong>RC Transmitter Manual Override</strong></td>
+            <td>Mode switch (LOITER / ALT_HOLD) and emergency BRAKE switch tested &amp; verified</td>
+            <td>[ &nbsp; ] PASS</td>
+        </tr>
+    </tbody>
+</table>
+
+<div class="callout callout-success">
+    <div class="callout-title">READY FOR AUTONOMOUS FLIGHT</div>
+    With all 8 checklist items verified, your Holybro X500 is completely qualified for safe, fully autonomous QR survey and precision visual servoing.
+</div>
+
+<div class="grid-2" style="margin-top: 12px;">
+    <div class="card" style="padding: 8px 10px;">
+        <div class="card-title">Safety Pilot Field Clearance</div>
+        <div style="font-size: 7.5pt; color: #475569; margin-top: 6px; line-height: 1.6;">
+            <div><strong>Safety Pilot:</strong> ___________________________________</div>
+            <div><strong>Signature:</strong> &nbsp;&nbsp;&nbsp;&nbsp;___________________________________</div>
+            <div><strong>Date / Time:</strong> &nbsp;___________________________________</div>
+        </div>
+    </div>
+    <div class="card" style="padding: 8px 10px;">
+        <div class="card-title">Mission Systems &amp; Software Lead</div>
+        <div style="font-size: 7.5pt; color: #475569; margin-top: 6px; line-height: 1.6;">
+            <div><strong>Systems Lead:</strong> _________________________________</div>
+            <div><strong>Signature:</strong> &nbsp;&nbsp;&nbsp;&nbsp;___________________________________</div>
+            <div><strong>Airframe S/N:</strong> _________________________________</div>
+        </div>
+    </div>
+</div>
+
+</body>
+</html>

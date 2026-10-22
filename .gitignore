@@ -21,3 +21,4 @@ __pycache__/
 # Temporary outputs
 /tmp/
 *.log
+docs/demo_mission.mp4
