@@ -6,6 +6,29 @@ Autonomous aerial reconnaissance, rotation-invariant QR similarity matching, and
 
 ---
 
+## 🎬 Flight Demo Video
+
+<p align="center">
+  <img src="assets/demo_highlight.gif" alt="Autonomous QR Detection & Precision Alignment Flight Demo" width="88%">
+</p>
+<p align="center">
+  <em>Live SITL Flight: Blue Zone takeoff &bull; QR memorization &bull; Lawnmower survey &bull; 100% similarity lock &bull; Sub-centimeter alignment hold.</em>
+  <br>
+  🎥 <strong><a href="assets/demo.mp4">▶ Click here to view/download the full high-definition demo video (assets/demo.mp4)</a></strong>
+</p>
+
+<details>
+<summary>▶ <strong>Click to expand embedded HTML5 video player</strong></summary>
+<br>
+<p align="center">
+  <video src="assets/demo.mp4" controls="controls" width="100%" poster="assets/demo_thumbnail.jpg">
+    Your browser does not support the video tag. You can <a href="assets/demo.mp4">download the MP4 directly</a>.
+  </video>
+</p>
+</details>
+
+---
+
 ## Key Capabilities
 
 1. **Dual-Zone Spatial Isolation:**
@@ -30,6 +53,10 @@ Autonomous aerial reconnaissance, rotation-invariant QR similarity matching, and
 
 ```
 aerothon_ws/
+├── assets/
+│   ├── demo_highlight.gif     # Animated flight demo preview
+│   ├── demo.mp4               # Full 1080p flight screencast recording
+│   └── demo_thumbnail.jpg     # Video cover thumbnail
 ├── aerothon_system_guide.pdf  # Comprehensive 6-page technical report
 ├── aerothon_system_guide.html # Standalone printable HTML report
 ├── README.md                  # Project overview and quick start
