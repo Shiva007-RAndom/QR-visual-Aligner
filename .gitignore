@@ -22,3 +22,6 @@ __pycache__/
 /tmp/
 *.log
 docs/demo_mission.mp4
+/live_camera_check.jpg
+/siyi_test_capture.jpg
+/reference_qr_memorized.png

@@ -28,21 +28,31 @@ QR_POSITIONS = {
 }
 TAKEOFF_PAD = (-25.0, 0.0)
 
-def connect_drone(url=None):
+def connect_drone(url=None, baud=921600):
+    if url and url.startswith("/dev/") and ":" in url:
+        parts = url.split(":")
+        url = parts[0]
+        try:
+            baud = int(parts[1])
+        except ValueError:
+            pass
+
     if url:
-        ports_to_try = [url]
+        ports_to_try = [(url, baud)]
     else:
-        ports_to_try = [
-            "udpin:0.0.0.0:14550",
-            "udpin:0.0.0.0:14551",
-            "tcp:127.0.0.1:5762",
-            "tcp:127.0.0.1:5763"
+        import glob
+        detected = glob.glob("/dev/ttyACM*") + glob.glob("/dev/ttyUSB*")
+        ports_to_try = [(p, baud) for p in detected] + [
+            ("udpin:0.0.0.0:14550", 115200),
+            ("udpin:0.0.0.0:14551", 115200),
+            ("tcp:127.0.0.1:5762", 115200),
+            ("tcp:127.0.0.1:5763", 115200)
         ]
-    for p in ports_to_try:
+    for p, b in ports_to_try:
         if not p: continue
         try:
-            print(f"[DRONE] Trying connection on {p}...")
-            m = mavutil.mavlink_connection(p)
+            print(f"[DRONE] Trying connection on {p} @ {b}...")
+            m = mavutil.mavlink_connection(p, baud=b)
             try:
                 m.mav.heartbeat_send(
                     mavutil.mavlink.MAV_TYPE_GCS,
@@ -56,7 +66,7 @@ def connect_drone(url=None):
                 return m
         except Exception:
             pass
-    raise RuntimeError("Could not connect to ArduPilot on UDP 14550/14551 or TCP 5762/5763. Is SITL running?")
+    raise RuntimeError("Could not connect to ArduPilot. Check physical connection (/dev/ttyACM0 or /dev/ttyUSB0).")
 
 def send_local_ned(m, north, east, down):
     type_mask = 0b110111111000
@@ -99,15 +109,18 @@ def arm_and_takeoff(m, target_alt=3.0):
 def main():
     parser = argparse.ArgumentParser(description="Fly ArduPilot in local meter coordinates")
     parser.add_argument("--takeoff", type=float, help="Arm and takeoff to specified altitude in meters")
-    parser.add_argument("--x", type=float, default=None, help="Target X (North) coordinate in meters")
-    parser.add_argument("--y", type=float, default=None, help="Target Y (East) coordinate in meters")
+    parser.add_argument("--x", "--target-n", dest="x", type=float, default=None, help="Target North (X) coordinate in meters")
+    parser.add_argument("--y", "--target-e", dest="y", type=float, default=None, help="Target East (Y) coordinate in meters")
     parser.add_argument("--alt", type=float, default=3.5, help="Target altitude in meters")
+    parser.add_argument("--target-d", type=float, default=None, help="Target Down coordinate in meters (negative is up)")
     parser.add_argument("--qr", type=int, choices=[1, 2, 3, 4], help="Fly directly to QR code index (1-4)")
     parser.add_argument("--home", action="store_true", help="Fly back to (0, 0)")
     parser.add_argument("--land", action="store_true", help="Land the drone")
     parser.add_argument("--url", default=None, help="MAVLink connection URL")
     
     args = parser.parse_args()
+    if args.target_d is not None:
+        args.alt = abs(args.target_d)
     
     m = connect_drone(args.url)
     
