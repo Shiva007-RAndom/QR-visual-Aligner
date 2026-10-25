@@ -172,7 +172,7 @@ class DroneController:
         self.servos = [1000, 1000, 1000, 1000]
         self.cmd_roll_deg = 0.0
         self.cmd_pitch_deg = 0.0
-        self._last_att_send = time.time()
+        self._att_running = False
 
         # Auto-parse /dev/tty*:baud if passed with a colon
         if url and url.startswith("/dev/") and ":" in url:
@@ -199,17 +199,26 @@ class DroneController:
             mavutil.mavlink.MAV_TYPE_GCS,
             mavutil.mavlink.MAV_AUTOPILOT_INVALID, 0, 0, 0
         )
-        hb = self.m.wait_heartbeat(timeout=5.0)
-        if hb is None:
-            raise RuntimeError(f"Could not connect to ArduPilot on {url}. Verify physical connection and baud rate.")
 
-        self.sys = self.m.target_system
-        self.comp = self.m.target_component
+        # Wait specifically for true Autopilot heartbeat (System ID 1, not GCS)
+        t_hb = time.time()
+        self.sys = 1
+        self.comp = 1
+        while time.time() - t_hb < 6.0:
+            msg = self.m.recv_match(type="HEARTBEAT", blocking=True, timeout=1.0)
+            if msg and msg.type != mavutil.mavlink.MAV_TYPE_GCS:
+                self.sys = msg.get_srcSystem()
+                self.comp = msg.get_srcComponent()
+                self.m.target_system = self.sys
+                self.m.target_component = self.comp
+                print(f"[MAVLINK] Autopilot confirmed! System ID: {self.sys}, Component: {self.comp}, Mode: {self.m.flightmode}")
+                break
+
         self.ned = [0.0, 0.0, 0.0]
         self.yaw = 0.0
         self.armed = False
         self._last_hb = time.time()
-        print(f"[MAVLINK] Heartbeat confirmed! System {self.sys}, Component {self.comp}")
+
         if self.bench_sim:
             print("[MAVLINK] BENCH-SIMULATION MODE ACTIVE: Flight kinematics emulated on benchtop.")
         if self.spin_motors:
@@ -219,18 +228,34 @@ class DroneController:
                 self.sys, self.comp,
                 mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS, 20, 1
             )
+            # Temporarily disable auto-disarm timer on bench
+            self.m.mav.param_set_send(self.sys, self.comp, b"DISARM_DELAY", 0.0, mavutil.mavlink.MAV_PARAM_TYPE_REAL32)
 
-    def _send_attitude_target(self):
-        q = euler_to_quaternion(
-            math.radians(self.cmd_roll_deg),
-            math.radians(self.cmd_pitch_deg),
-            0.0
-        )
-        self.m.mav.set_attitude_target_send(
-            0, self.sys, self.comp,
-            0b00000111, q,
-            0, 0, 0, self.thrust
-        )
+            # Start dedicated 25 Hz attitude streaming thread to prevent GUID_TIMEOUT
+            self._att_running = True
+            self._att_thread = threading.Thread(target=self._attitude_streaming_loop, daemon=True)
+            self._att_thread.start()
+
+    def _attitude_streaming_loop(self):
+        """Dedicated high-priority 25 Hz background attitude loop."""
+        while self._att_running:
+            if self.armed and self.spin_motors:
+                now_ms = int(time.time() * 1000) & 0xFFFFFFFF
+                q = euler_to_quaternion(
+                    math.radians(self.cmd_roll_deg),
+                    math.radians(self.cmd_pitch_deg),
+                    0.0
+                )
+                try:
+                    self.m.mav.set_attitude_target_send(
+                        now_ms,
+                        self.sys, self.comp,
+                        0b00000111, q,
+                        0, 0, 0, self.thrust
+                    )
+                except Exception:
+                    pass
+            time.sleep(0.04)
 
     def set_attitude(self, roll_deg: float, pitch_deg: float):
         self.cmd_roll_deg = max(-10.0, min(10.0, roll_deg))
@@ -253,30 +278,45 @@ class DroneController:
                 self.ned = [msg.x, msg.y, msg.z]
             elif mtype == "ATTITUDE":
                 self.yaw = msg.yaw
-            elif mtype == "HEARTBEAT":
+            elif mtype == "HEARTBEAT" and msg.type != mavutil.mavlink.MAV_TYPE_GCS:
                 self.armed = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
 
         if self.bench_sim:
             self.ned = list(self.sim_ned)
 
-        # In GUIDED_NOGPS with spin_motors, continuously stream attitude targets at ~20 Hz
-        if self.spin_motors and self.armed:
-            if now - self._last_att_send >= 0.05:
-                self._send_attitude_target()
-                self._last_att_send = now
-
-    def set_mode(self, mode_name: str):
+    def set_mode(self, mode_name: str, timeout: float = 3.0) -> bool:
         mode_id = self.m.mode_mapping().get(mode_name)
-        if mode_id is not None:
-            for _ in range(3):
-                self.m.mav.command_long_send(
-                    self.sys, self.comp,
-                    mavutil.mavlink.MAV_CMD_DO_SET_MODE,
-                    0,
-                    mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
-                    mode_id, 0, 0, 0, 0, 0
-                )
-                time.sleep(0.04)
+        if mode_id is None and mode_name == "GUIDED_NOGPS":
+            mode_id = 20
+        if mode_id is None:
+            print(f"[MODE ERROR] Unknown flight mode: {mode_name}")
+            return False
+
+        print(f"[MODE] Commanding mode switch to {mode_name} (ID: {mode_id})...")
+        for attempt in range(4):
+            self.m.mav.command_long_send(
+                self.sys, self.comp,
+                mavutil.mavlink.MAV_CMD_DO_SET_MODE,
+                0,
+                mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                mode_id, 0, 0, 0, 0, 0
+            )
+            t_check = time.time()
+            while time.time() - t_check < 0.6:
+                msg = self.m.recv_match(type=['COMMAND_ACK', 'HEARTBEAT'], blocking=True, timeout=0.1)
+                if msg:
+                    if msg.get_type() == 'COMMAND_ACK' and msg.command == mavutil.mavlink.MAV_CMD_DO_SET_MODE:
+                        if msg.result == mavutil.mavlink.MAV_RESULT_ACCEPTED:
+                            print(f"[MODE CONFIRMED] Autopilot acknowledged mode {mode_name} (ACK: ACCEPTED)!")
+                            return True
+                    elif msg.get_type() == 'HEARTBEAT' and msg.type != mavutil.mavlink.MAV_TYPE_GCS:
+                        if msg.custom_mode == mode_id or self.m.flightmode == mode_name:
+                            print(f"[MODE CONFIRMED] Autopilot verified in {mode_name} mode!")
+                            return True
+            time.sleep(0.1)
+
+        print(f"[MODE WARN] Mode switch to {mode_name} reached timeout. Current: {self.m.flightmode}")
+        return False
 
     def arm_and_takeoff(self, target_alt: float = 4.0):
         if not self.bench_sim and not self.spin_motors:
@@ -314,20 +354,9 @@ class DroneController:
                 print(f"  Countdown: {sec}...", flush=True)
                 time.sleep(1.0)
 
-            # Switch to GUIDED_NOGPS (mode 20)
-            self.m.mav.command_long_send(
-                self.sys, self.comp,
-                mavutil.mavlink.MAV_CMD_DO_SET_MODE,
-                0,
-                mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
-                20, 0, 0, 0, 0, 0
-            )
+            # Switch to GUIDED_NOGPS and confirm
+            self.set_mode("GUIDED_NOGPS")
             time.sleep(0.2)
-
-            # Prime attitude target stream before arming
-            for _ in range(6):
-                self._send_attitude_target()
-                time.sleep(0.04)
 
             print(f"[DRONE] Arming motors at bench thrust {self.thrust*100:.0f}%...")
             for _ in range(8):
@@ -367,6 +396,18 @@ class DroneController:
             self.sim_ned[2] = -target_alt
             self.ned = list(self.sim_ned)
             print(f"[BENCH-SIM] Target altitude reached: {target_alt:.1f}m AGL")
+
+    def rearm(self):
+        """Re-arm motors if autopilot disarmed unexpectedly during bench test."""
+        self.set_mode("GUIDED_NOGPS")
+        time.sleep(0.1)
+        self.m.mav.command_long_send(
+            self.sys, self.comp,
+            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+            0, 1, 21196, 0, 0, 0, 0, 0
+        )
+        time.sleep(0.2)
+        self.poll()
 
     def setpoint(self, north: float, east: float, down: float):
         if not self.spin_motors:
@@ -414,6 +455,8 @@ class DroneController:
                 self.poll()
                 time.sleep(0.05)
             self.thrust = 0.0
+            self._att_running = False
+
             print("[DRONE] Disarming motors...")
             for _ in range(5):
                 self.m.mav.command_long_send(
@@ -422,14 +465,11 @@ class DroneController:
                     0, 0, 0, 0, 0, 0, 0, 0
                 )
                 time.sleep(0.1)
+
+            # Restore DISARM_DELAY to 10.0
+            self.m.mav.param_set_send(self.sys, self.comp, b"DISARM_DELAY", 10.0, mavutil.mavlink.MAV_PARAM_TYPE_REAL32)
             # Switch back to STABILIZE mode
-            self.m.mav.command_long_send(
-                self.sys, self.comp,
-                mavutil.mavlink.MAV_CMD_DO_SET_MODE,
-                0,
-                mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
-                0, 0, 0, 0, 0, 0
-            )
+            self.set_mode("STABILIZE")
             self.armed = False
             print("[COMPLETE] Multirotor disarmed and safe!")
         else:
@@ -678,6 +718,7 @@ class RealWorldLawnmowerMission:
 
         target_qr_ned = None
         hfov = self.args.hfov_rad
+        last_motor_log = time.time()
 
         for wp_idx, (target_n, target_e) in enumerate(route):
             tgt_ned = [target_n, target_e, -self.args.alt]
@@ -685,6 +726,17 @@ class RealWorldLawnmowerMission:
 
             while True:
                 self.drone.poll()
+
+                # Guard: ensure motors stay armed if spin_motors is enabled
+                if self.drone.spin_motors and not self.drone.armed:
+                    print("\n[AUTOPILOT ALERT] Autopilot reported DISARMED! Re-asserting arm in GUIDED_NOGPS...")
+                    self.drone.rearm()
+
+                now_t = time.time()
+                if self.drone.spin_motors and (now_t - last_motor_log >= 1.0):
+                    last_motor_log = now_t
+                    print(f"  [MOTORS SWEEP] ESC PWM: M1={self.drone.servos[0]} M2={self.drone.servos[1]} M3={self.drone.servos[2]} M4={self.drone.servos[3]} | Tilt: Pitch={self.drone.cmd_pitch_deg:+.1f} deg, Roll={self.drone.cmd_roll_deg:+.1f} deg")
+
                 detected_pts = None
                 sim_score = 0.0
                 is_match = False
