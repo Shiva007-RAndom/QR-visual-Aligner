@@ -5,35 +5,50 @@ AeroTHON 2026 — Master Banner Corridor & QR Lawnmower Mission Controller
 Production autonomous mission script for Holybro X500 (Cube Orange+ ArduPilot 4.5,
 Raspberry Pi 5 companion computer, SIYI A8 mini RTSP gimbal camera).
 
-Full 12-Stage Mission Flow:
----------------------------
-  STAGE 1 : Takeoff to altitude (default 5.0m AGL) and stabilize hover at (0, 0).
-  STAGE 2 : Surge forward by --surge1 (default 2.0m) and scan/memorize reference QR code.
-  STAGE 3 : Surge forward again by --surge2 (default 2.0m).
-  STAGE 4 : Sway left (West / Body -Y) up to --max-sway (default 20.0m) searching for Green Banner.
-  STAGE 5 : Position-Based Visual Servoing (PBVS) alignment with Green Banner; record lateral sway x.
-  STAGE 6 : Descend to --corridor-alt (default 3.0m).
-  STAGE 7 : Surge forward through Green Corridor for --corridor-surge (default 10.0m).
-  STAGE 8 : Once exiting corridor, sway left by (19 - x) meters (positioning 1m from 20m wall).
-            Climb to survey altitude (--alt 5.0m).
-  STAGE 9 : Execute lawnmower serpentine reconnaissance to locate matching candidate QR code.
-  STAGE 10: Precision PBVS centering over target QR and steady lock hover for 15 seconds.
-  STAGE 11: Navigate to adjacent return corridor entrance, yaw 180° (South), detect Blue Banner,
-            align visually, descend to 3.0m, and surge through return corridor by --corridor-surge.
-  STAGE 12: Exit return corridor, navigate back to takeoff pad (0, 0), and execute precision LAND.
+Full Architecture & Sequence:
+-----------------------------
+  STAGE 1 : Autonomous Takeoff to transit altitude (relative to takeoff point).
+            Records takeoff NED position and heading (no hard-coded North/West).
+  STAGE 2 : Surge forward by --surge1 along takeoff heading & scan reference QR.
+            Reference QR must come ONLY from the camera (NO loading from disk).
+            If reference QR is not acquired within timeout, field QR reconnaissance
+            and hover are skipped entirely, proceeding straight to corridor transit.
+  STAGE 3 : Surge forward again by --surge2 along takeoff heading.
+  STAGE 4 : Sway left along takeoff left axis up to --max-sway searching for Green Banner.
+            Uses strict color segmentation (#00B140) + rotated rectangle classification
+            (ratio >= 8.0, fill >= 0.60, full-view check, persistence >= 3 frames).
+            Async RapidOCR verifies "AeroTHON" AND "2026".
+            If Green Banner is NOT found: flies back to takeoff pad and lands.
+  STAGE 5 : Position-Based Visual Servoing (PBVS) alignment with Green Banner.
+            Reconstructs partial views along rotated long axis.
+            Determines corridor heading perpendicular to banner, resolving 180° ambiguity
+            and rejecting corrections > 25°.
+            Measures lateral sway x along takeoff left axis.
+  STAGE 6 : Descend to --corridor-alt (relative to takeoff point).
+  STAGE 7 : Surge forward through Green Corridor for --corridor-surge along corridor heading.
+  STAGE 8 : Move left by (19 - x) meters along corridor lateral axis (1m from 20m wall).
+            Climb back to transit altitude.
+  STAGE 9 : Lawnmower serpentine reconnaissance for candidate twin QR (skipped if ref QR missed).
+  STAGE 10: Precision PBVS centering over target QR and 15-second steady hover lock.
+  STAGE 11: Return Corridor: Predict Blue Banner (#0000FF) position from measured green banner,
+            corridor heading, spacing and forward offset. Fly there at transit altitude,
+            yaw to return heading (corridor_heading + 180°), and search locally (±3m lat, ±1.5m fwd).
+            If Blue Banner is NOT found: does NOT descend or surge blind; flies home and lands.
+            If found: PBVS align, descend, surge through return corridor by --corridor-surge.
+  STAGE 12: Fly back to takeoff point at transit altitude and execute precision LAND.
 
-Supports:
-  - Real outdoor GPS flight with MAVLink GUIDED/BRAKE modes.
-  - Benchtop hardware-in-the-loop simulation (--bench-sim).
-  - Safe bench motor spinning with propeller removal (--spin-motors --thrust 0.20).
-  - Real-time SIYI A8 mini zero-latency RTSP capture.
-  - Dual Green / Blue banner detection with RapidOCR + HSV contour fallback.
-  - 4-rotation invariant QR module similarity matching + pyzbar fallback.
+Vision Test Mode:
+-----------------
+  python3 scripts/banner_corridor_qr_full_mission.py --vision-test green
+  python3 scripts/banner_corridor_qr_full_mission.py --vision-test blue
+  (Runs live camera detection with diagnostic rotated rectangles, corners, ratio, fill,
+   verdicts, and 'm' key to toggle color mask overlay. No MAVLink, no flight.)
 """
 
 import argparse
 import math
 import os
+import queue
 import re
 import sys
 import threading
@@ -51,7 +66,7 @@ from pymavlink import mavutil
 
 
 # ==============================================================================
-# 1. HELPER MATH & GEOMETRY FUNCTIONS
+# 1. GEOMETRY, MATH & COORDINATE HELPERS
 # ==============================================================================
 
 def wrap_pi(rad: float) -> float:
@@ -107,6 +122,18 @@ def pixel_to_ned_offset(
     dn = dx_body * math.cos(yaw_rad) - dy_body * math.sin(yaw_rad)
     de = dx_body * math.sin(yaw_rad) + dy_body * math.cos(yaw_rad)
     return dn, de
+
+
+def get_body_axes(yaw_rad: float) -> Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float]]:
+    """
+    Returns (forward, left, right) unit vectors in Local NED for given heading.
+    NED convention: +X = North, +Y = East.
+    Yaw is measured clockwise from North (+X).
+    """
+    fwd = (math.cos(yaw_rad), math.sin(yaw_rad))
+    left = (math.sin(yaw_rad), -math.cos(yaw_rad))
+    right = (-math.sin(yaw_rad), math.cos(yaw_rad))
+    return fwd, left, right
 
 
 # ==============================================================================
@@ -178,14 +205,9 @@ class SiyiStreamWorker:
 
 
 # ==============================================================================
-# 3. DUAL BANNER DETECTOR (GREEN & BLUE, RAPIDOCR + COLOR CONTOUR FALLBACK)
+# 3. ASYNCHRONOUS RAPIDOCR WORKER (NON-BLOCKING)
 # ==============================================================================
 
-# Physical Banner Dimensions (AeroTHON competition specifications)
-BANNER_LENGTH_M = 3.5052  # 11.5 ft
-BANNER_WIDTH_M = 0.3048   # 1.0 ft
-
-# Target OCR Brand text strings
 TARGET_BRAND = "aerothon"
 TARGET_YEAR = "2026"
 _CONFUSION = str.maketrans({
@@ -223,23 +245,37 @@ def partial_match_distance(text: str, target: str) -> int:
     return min(prev)
 
 
-class BannerDetector:
-    """
-    Robust Dual Banner Detector for Holybro X500.
-    Supports both Green ("AeroTHON 2026") and Blue ("AeroTHON 2026") banners.
-    Combines RapidOCR text reading with HSV geometric blob analysis and
-    partial edge reconstruction.
-    """
-    def __init__(self, ocr_threads: int = 2, verbose: bool = False):
-        self.verbose = verbose
-        self.engine = None
-        self._init_ocr(ocr_threads)
+def extract_ocr_items(ocr_output: Any) -> List[Tuple[np.ndarray, str, float]]:
+    items = []
+    if ocr_output is None:
+        return items
+    if hasattr(ocr_output, 'boxes') and hasattr(ocr_output, 'txts') and hasattr(ocr_output, 'scores'):
+        if ocr_output.boxes is not None and ocr_output.txts is not None:
+            for b, t, s in zip(ocr_output.boxes, ocr_output.txts, ocr_output.scores):
+                items.append((np.asarray(b, dtype=np.float32), str(t), float(s)))
+        return items
+    if isinstance(ocr_output, (list, tuple)):
+        target = ocr_output[0] if (len(ocr_output) == 2 and isinstance(ocr_output[0], list)) else ocr_output
+        for item in target:
+            if len(item) == 3:
+                items.append((np.asarray(item[0], dtype=np.float32), str(item[1]), float(item[2])))
+    return items
 
-        # HSV Thresholds
-        self.lower_green = np.array([30, 20, 40])
-        self.upper_green = np.array([85, 255, 255])
-        self.lower_blue = np.array([90, 50, 40])
-        self.upper_blue = np.array([135, 255, 255])
+
+class AsyncOCRWorker:
+    """
+    Dedicated background thread for RapidOCR. Never blocks the flight control loop.
+    Strictly verifies that BOTH 'AeroTHON' (edit distance <= 2) AND '2026' are present.
+    """
+    def __init__(self, threads: int = 2):
+        self.lock = threading.Lock()
+        self.job_queue = queue.Queue(maxsize=1)
+        self.latest_match = None
+        self.running = True
+        self.engine = None
+        self._init_ocr(threads)
+        self.thread = threading.Thread(target=self._worker_loop, daemon=True)
+        self.thread.start()
 
     def _init_ocr(self, threads: int):
         try:
@@ -255,188 +291,395 @@ class BannerDetector:
                 self.engine = RapidOCR(params=params)
             except Exception:
                 self.engine = RapidOCR()
-            print("[VISION] RapidOCR engine initialized successfully.")
+            print("[VISION] RapidOCR background engine initialized.")
         except Exception as e:
-            print(f"[VISION WARN] RapidOCR unavailable ({e}). Fallback to color contour matching.")
+            print(f"[VISION WARN] RapidOCR unavailable ({e}). Running shape-only classification.")
             self.engine = None
 
-    def build_mask(self, img: np.ndarray, color: str = "green") -> np.ndarray:
-        blur = cv2.GaussianBlur(img, (5, 5), 0)
-        hsv = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
-        if color.lower() == "blue":
-            mask = cv2.inRange(hsv, self.lower_blue, self.upper_blue)
-        else:
-            mask = cv2.inRange(hsv, self.lower_green, self.upper_green)
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        return cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    def _worker_loop(self):
+        while self.running:
+            try:
+                crop, meta = self.job_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
 
-    def extract_ocr_items(self, ocr_output: Any) -> List[Tuple[np.ndarray, str, float]]:
-        items = []
-        if ocr_output is None:
-            return items
-        if hasattr(ocr_output, 'boxes') and hasattr(ocr_output, 'txts') and hasattr(ocr_output, 'scores'):
-            if ocr_output.boxes is not None and ocr_output.txts is not None:
-                for b, t, s in zip(ocr_output.boxes, ocr_output.txts, ocr_output.scores):
-                    items.append((np.asarray(b, dtype=np.float32), str(t), float(s)))
-            return items
-        if isinstance(ocr_output, (list, tuple)):
-            target = ocr_output[0] if (len(ocr_output) == 2 and isinstance(ocr_output[0], list)) else ocr_output
-            for item in target:
-                if len(item) == 3:
-                    items.append((np.asarray(item[0], dtype=np.float32), str(item[1]), float(item[2])))
-        return items
+            if self.engine is None or crop is None or crop.size == 0:
+                continue
+
+            try:
+                ocr_out = self.engine(crop)
+                items = extract_ocr_items(ocr_out)
+                if items:
+                    combined_text = " ".join([txt for _, txt, _ in items])
+                    c_txt = canon(combined_text)
+                    b_dist = partial_match_distance(c_txt, BRAND_C)
+                    has_year = YEAR_C in c_txt
+                    # Strict check: BOTH brand (dist <= 2) AND year (2026) required!
+                    if b_dist <= 2 and has_year:
+                        mean_score = float(np.mean([score for _, _, score in items]))
+                        with self.lock:
+                            self.latest_match = {
+                                "meta": meta,
+                                "text": combined_text,
+                                "score": mean_score,
+                                "time": time.time()
+                            }
+            except Exception:
+                pass
+
+    def submit_job(self, crop: np.ndarray, meta: Dict[str, Any]):
+        if self.engine is None or crop is None:
+            return
+        try:
+            try:
+                self.job_queue.get_nowait()
+            except queue.Empty:
+                pass
+            self.job_queue.put_nowait((crop.copy(), meta))
+        except queue.Full:
+            pass
+
+    def get_latest_match(self) -> Optional[Dict[str, Any]]:
+        with self.lock:
+            return self.latest_match
+
+    def clear_match(self):
+        with self.lock:
+            self.latest_match = None
+
+    def stop(self):
+        self.running = False
+
+
+# ==============================================================================
+# 4. COLOR-FIRST & STRICT SHAPE BANNER DETECTOR
+# ==============================================================================
+
+# Physical Banner Dimensions (AeroTHON specifications: 11.5 ft x 1 ft)
+BANNER_LENGTH_M = 3.5052  # 11.5 ft
+BANNER_WIDTH_M = 0.3048   # 1.0 ft
+
+
+class BannerDetector:
+    """
+    Robust Banner Detector:
+      1. Color segmentation: Dynamic RGB -> HSV target with configurable tolerance.
+      2. Morphological smoothing: Open 3x3 (speckle) + Close ellipse ~1.2% width (bridge text & border).
+      3. Strict Rotated-Rectangle classification (full-view, ratio >= 8.0, fill >= 0.60, persistence >= 3).
+      4. Optional non-blocking RapidOCR (requires BOTH 'AeroTHON' and '2026').
+      5. Pinhole center reconstruction along rotated long axis for partial views.
+    """
+    def __init__(self, args, verbose: bool = False):
+        self.args = args
+        self.verbose = verbose
+        self.ocr_worker = AsyncOCRWorker(threads=args.ocr_threads)
+
+        # Dynamic HSV target calculations from exact competition RGB colors
+        # GREEN: #00B140 = RGB(0, 177, 64) -> BGR: (64, 177, 0)
+        # BLUE:  #0000FF = RGB(0, 0, 255) -> BGR: (255, 0, 0)
+        self.green_bgr = np.uint8([[[64, 177, 0]]])
+        self.blue_bgr = np.uint8([[[255, 0, 0]]])
+
+        self.green_hsv_target = cv2.cvtColor(self.green_bgr, cv2.COLOR_BGR2HSV)[0][0]
+        self.blue_hsv_target = cv2.cvtColor(self.blue_bgr, cv2.COLOR_BGR2HSV)[0][0]
+
+        # Persistence tracking state
+        self.tracked_center: Optional[Tuple[float, float]] = None
+        self.consecutive_hits: int = 0
+        self.last_color: str = ""
+
+    def get_hsv_ranges(self, color: str) -> List[Tuple[np.ndarray, np.ndarray]]:
+        """Calculates OpenCV HSV lower/upper bounds with wrap-around handling."""
+        if color.lower() == "blue":
+            target_h = int(self.blue_hsv_target[0])
+            h_tol = self.args.blue_h_tol
+            s_min = self.args.blue_s_min
+            v_min = self.args.blue_v_min
+        else:
+            target_h = int(self.green_hsv_target[0])
+            h_tol = self.args.green_h_tol
+            s_min = self.args.green_s_min
+            v_min = self.args.green_v_min
+
+        h_low = target_h - h_tol
+        h_high = target_h + h_tol
+
+        ranges = []
+        if h_low < 0:
+            ranges.append((np.array([0, s_min, v_min], dtype=np.uint8), np.array([h_high, 255, 255], dtype=np.uint8)))
+            ranges.append((np.array([180 + h_low, s_min, v_min], dtype=np.uint8), np.array([179, 255, 255], dtype=np.uint8)))
+        elif h_high > 179:
+            ranges.append((np.array([h_low, s_min, v_min], dtype=np.uint8), np.array([179, 255, 255], dtype=np.uint8)))
+            ranges.append((np.array([0, s_min, v_min], dtype=np.uint8), np.array([h_high - 180, 255, 255], dtype=np.uint8)))
+        else:
+            ranges.append((np.array([h_low, s_min, v_min], dtype=np.uint8), np.array([h_high, 255, 255], dtype=np.uint8)))
+        return ranges
+
+    def build_color_mask(self, img_bgr: np.ndarray, color: str) -> np.ndarray:
+        blur = cv2.GaussianBlur(img_bgr, (5, 5), 0)
+        hsv = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
+        ranges = self.get_hsv_ranges(color)
+        mask = None
+        for low, high in ranges:
+            m = cv2.inRange(hsv, low, high)
+            mask = m if mask is None else cv2.bitwise_or(mask, m)
+
+        # Morphological OPEN (3x3 rect removes noise/speckle)
+        opened = cv2.morphologyEx(mask, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))
+
+        # Morphological CLOSE (elliptical kernel of ~1.2% image width, joins white border & text)
+        w_img = img_bgr.shape[1]
+        k = max(3, int(round(0.012 * w_img)))
+        k = k if k % 2 == 1 else k + 1
+        kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+        closed = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel_close)
+        return closed
 
     def detect(
-        self, frame: np.ndarray, color: str = "green", alt_m: float = 5.0, hfov_rad: float = 1.22
-    ) -> Optional[Dict[str, Any]]:
+        self, frame: np.ndarray, color: str = "green", alt_rel: float = 5.0, hfov_rad: float = 1.22
+    ) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], np.ndarray]:
         """
-        Detects green or blue banner in frame.
-        Returns dictionary with:
-          - u, v: centroid coordinates in pixels (reconstructed if partially visible)
-          - quad: 4x2 ordered corners (TL, TR, BR, BL)
-          - angle_rad: banner long axis orientation in radians
-          - partial: boolean indicating if banner is truncated by image border
-          - source: 'OCR' or 'CONTOUR'
-          - text: decoded text string
-          - size: (W, H)
+        Executes color segmentation, region extraction, strict shape checks, and persistence.
+        Returns:
+          - best_banner (Dict or None)
+          - all_candidates (List of region diagnostic dicts)
+          - closed_color_mask (for vision-test overlay)
         """
         if frame is None:
-            return None
-        H, W = frame.shape[:2]
-        color_mask = self.build_mask(frame, color=color)
+            return None, [], np.zeros((100, 100), dtype=np.uint8)
 
-        # 1. Morphological closure on color mask
-        k_size = max(5, int(0.015 * max(H, W)))
-        k_size = k_size if k_size % 2 == 1 else k_size + 1
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k_size, k_size))
-        closed_mask = cv2.morphologyEx(color_mask, cv2.MORPH_CLOSE, kernel)
+        full_h, full_w = frame.shape[:2]
 
-        # 2. Find external color blobs
-        cnts, _ = cv2.findContours(closed_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        candidates = []
-        min_area = 0.0004 * H * W
+        # 1. Downscale frame to ~640 px wide work frame
+        work_w = 640
+        scale = float(work_w) / float(full_w)
+        work_h = int(round(full_h * scale))
+        work_img = cv2.resize(frame, (work_w, work_h), interpolation=cv2.INTER_AREA)
+
+        # 2. Color segmentation
+        color_mask = self.build_color_mask(work_img, color=color)
+
+        # 3. Extract regions (contours)
+        min_area_frac = self.args.green_min_area if color.lower() == "green" else self.args.blue_min_area
+        min_area_px = min_area_frac * float(work_w * work_h)
+        cnts, _ = cv2.findContours(color_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        candidate_regions = []
         for c in cnts:
             area = cv2.contourArea(c)
-            if area < min_area:
-                continue
+            if area >= min_area_px:
+                candidate_regions.append((area, c))
+        candidate_regions.sort(key=lambda x: x[0], reverse=True)
+
+        all_diagnostics = []
+        shape_passing_candidates = []
+        margin_px = max(8.0, 0.02 * min(work_w, work_h))
+
+        # Check OCR background match
+        ocr_match = self.ocr_worker.get_latest_match()
+        ocr_confirmed_quad = None
+        ocr_confirmed_text = ""
+
+        for area, c in candidate_regions:
             rect = cv2.minAreaRect(c)
-            (cx, cy), (rw, rh), ang = rect
-            bw, bh = max(rw, rh), min(rw, rh)
-            if bh < 4:
-                continue
-            aspect = bw / bh
-            # Banner is long strip (aspect ratio ~ 11.5)
-            candidates.append((area, c, rect, aspect))
+            (cx_w, cy_w), (rw_w, rh_w), ang = rect
+            long_side_w = max(rw_w, rh_w)
+            short_side_w = max(1e-3, min(rw_w, rh_w))
+            ratio = long_side_w / short_side_w
+            rect_area = long_side_w * short_side_w
+            fill = area / max(1e-3, rect_area)
 
-        candidates.sort(key=lambda x: x[0], reverse=True)
+            box_w = cv2.boxPoints(rect)
+            box_w = order_corners(box_w)
 
-        # 3. Check OCR on candidate crops if engine is available
-        best_ocr_match = None
-        if self.engine is not None and candidates:
-            for area, c, (center, (rw, rh), ang), aspect in candidates[:3]:
-                pts = cv2.boxPoints(((center[0], center[1]), (rw, rh), ang))
-                bx, by, bw, bh = cv2.boundingRect(np.int32(pts))
-                pad = max(4, int(0.1 * max(bw, bh)))
-                x0, y0 = max(0, bx - pad), max(0, by - pad)
-                x1, y1 = min(W, bx + bw + pad), min(H, by + bh + pad)
-                if x1 - x0 < 10 or y1 - y0 < 10:
+            # Full-frame edge check: all 4 corners must be >= margin_px from image edges
+            touching_edge = False
+            for px, py in box_w:
+                if px < margin_px or px > (work_w - margin_px) or py < margin_px or py > (work_h - margin_px):
+                    touching_edge = True
+                    break
+
+            # Scale back up to FULL-frame pixel coordinates
+            box_full = box_w / scale
+            center_full = (cx_w / scale, cy_w / scale)
+            long_side_full = long_side_w / scale
+
+            # Physical length sanity check
+            mpp = metres_per_pixel(alt_rel, full_w, hfov_rad)
+            length_m = long_side_full * mpp
+
+            # Long-side angle in image coordinates
+            e1 = box_full[1] - box_full[0]
+            e2 = box_full[3] - box_full[0]
+            long_edge = e1 if np.hypot(*e1) >= np.hypot(*e2) else e2
+            banner_angle = math.atan2(float(long_edge[1]), float(long_edge[0]))
+            if banner_angle >= math.pi / 2.0:
+                banner_angle -= math.pi
+            elif banner_angle < -math.pi / 2.0:
+                banner_angle += math.pi
+
+            diag = {
+                "quad": box_full,
+                "center": center_full,
+                "contour": c,
+                "ratio": ratio,
+                "fill": fill,
+                "touching_edge": touching_edge,
+                "length_m": length_m,
+                "angle": banner_angle,
+                "verdict": "REJECTED",
+                "reason": ""
+            }
+
+            # Submit crop to background OCR worker
+            bx, by, bw, bh = cv2.boundingRect(np.int32(box_full))
+            pad = int(0.1 * max(bw, bh))
+            x0, y0 = max(0, bx - pad), max(0, by - pad)
+            x1, y1 = min(full_w, bx + bw + pad), min(full_h, by + bh + pad)
+            if x1 > x0 + 10 and y1 > y0 + 10:
+                crop = frame[y0:y1, x0:x1]
+                self.ocr_worker.submit_job(crop, {"center": center_full, "color": color})
+
+            # Check if this region matches background OCR hit
+            if ocr_match is not None and (time.time() - ocr_match["time"]) < 2.0:
+                meta = ocr_match["meta"]
+                if meta.get("color") == color and math.dist(meta["center"], center_full) < (80.0 / scale):
+                    ocr_confirmed_quad = box_full
+                    ocr_confirmed_text = ocr_match["text"]
+                    diag["verdict"] = "BANNER (OCR)"
+                    diag["reason"] = f"OCR verified: '{ocr_confirmed_text}'"
+                    all_diagnostics.append(diag)
                     continue
 
-                crop = frame[y0:y1, x0:x1]
-                ocr_out = None
-                try:
-                    ocr_out = self.engine(crop)
-                except Exception:
-                    pass
+            # B2 Shape Classification Rules
+            # 1. Never classify region that covers most of frame or spans full dimension
+            if area / float(work_w * work_h) > 0.35:
+                diag["reason"] = "Covers >35% of frame"
+            elif long_side_w > 0.92 * max(work_w, work_h):
+                diag["reason"] = "Spans full image dimension"
+            # 2. Full-view check: must not touch edge
+            elif touching_edge:
+                diag["reason"] = "Border cut / touches margin"
+            # 3. Ratio check (default >= 8.0)
+            elif ratio < self.args.min_banner_ratio:
+                diag["reason"] = f"Ratio {ratio:.1f} < {self.args.min_banner_ratio:.1f}"
+            # 4. Fill check (default >= 0.60)
+            elif fill < self.args.min_banner_fill:
+                diag["reason"] = f"Fill {fill:.2f} < {self.args.min_banner_fill:.2f}"
+            # 5. Physical size check (optional, on by default unless bench-sim or disabled)
+            elif self.args.check_physical_size and not self.args.bench_sim and alt_rel > 1.5 and not (1.8 <= length_m <= 5.5):
+                diag["reason"] = f"Physical length {length_m:.1f}m outside [1.8m, 5.5m]"
+            else:
+                diag["verdict"] = "BANNER (SHAPE)"
+                diag["reason"] = f"Shape PASS: ratio={ratio:.1f}, fill={fill:.2f}"
+                shape_passing_candidates.append(diag)
 
-                items = self.extract_ocr_items(ocr_out)
-                for poly, txt, score in items:
-                    c_txt = canon(txt)
-                    b_dist = partial_match_distance(c_txt, BRAND_C)
-                    y_ok = YEAR_C in c_txt
-                    if self.verbose:
-                        print(f"  [{color.upper()} OCR] '{txt}' brand_dist={b_dist} year={y_ok} score={score:.2f}")
-                    if b_dist <= 2 or y_ok:
-                        best_ocr_match = {
-                            "contour": c,
-                            "rect": ((center[0], center[1]), (rw, rh), ang),
-                            "text": txt,
-                            "conf": score
-                        }
-                        break
-                if best_ocr_match is not None:
-                    break
+            all_diagnostics.append(diag)
 
-        chosen_c = None
-        source = "CONTOUR"
-        text_label = ""
-        if best_ocr_match is not None:
-            chosen_c = best_ocr_match["contour"]
-            source = "OCR"
-            text_label = best_ocr_match["text"]
-        elif candidates:
-            # Fallback to largest color contour with reasonable banner aspect
-            for area, c, rect, aspect in candidates:
-                if aspect >= 1.5:
-                    chosen_c = c
-                    source = "COLOR_BLOB"
-                    text_label = f"{color.upper()} BANNER"
-                    break
+        # 4. Immediate OCR classification if text was read
+        if ocr_confirmed_quad is not None:
+            if self.verbose:
+                print(f"[BANNER DETECTED via OCR] Color={color.upper()} | Text='{ocr_confirmed_text}'")
+            return self._build_banner_output(ocr_confirmed_quad, frame.shape, source="OCR",
+                                              text=ocr_confirmed_text, alt_rel=alt_rel, hfov_rad=hfov_rad), all_diagnostics, color_mask
 
-        if chosen_c is None:
-            return None
+        # 5. Selection among passing shape candidates: best ratio/fill closest to 11.5:1 and 0.85
+        if not shape_passing_candidates:
+            self.consecutive_hits = 0
+            self.tracked_center = None
+            return None, all_diagnostics, color_mask
 
-        # 4. Compute 4 corner points and long-axis angle
-        min_rect = cv2.minAreaRect(chosen_c)
-        quad = cv2.boxPoints(min_rect)
-        quad = order_corners(quad)
+        # Sort by distance to ideal banner shape (ratio=11.5, fill=0.85)
+        shape_passing_candidates.sort(key=lambda d: abs(d["ratio"] - 11.5) + 5.0 * abs(d["fill"] - 0.85))
+        best_candidate = shape_passing_candidates[0]
 
-        # Long-edge angle wrapped to [-pi/2, pi/2)
-        e1, e2 = quad[1] - quad[0], quad[2] - quad[1]
-        long_edge = e1 if np.hypot(*e1) >= np.hypot(*e2) else e2
-        banner_angle = math.atan2(float(long_edge[1]), float(long_edge[0]))
+        # 6. Persistence check: must pass in N consecutive frames
+        cand_c = best_candidate["center"]
+        track_dist_thresh = 100.0  # max pixels center can move between frames
+        if (self.tracked_center is not None and self.last_color == color and
+                math.dist(cand_c, self.tracked_center) < track_dist_thresh):
+            self.consecutive_hits += 1
+        else:
+            self.consecutive_hits = 1
+        self.tracked_center = cand_c
+        self.last_color = color
+
+        if self.consecutive_hits >= self.args.banner_persistence:
+            if self.verbose:
+                print(f"[BANNER CLASSIFIED via SHAPE] Color={color.upper()} | Ratio={best_candidate['ratio']:.1f} | Fill={best_candidate['fill']:.2f} | Consecutive={self.consecutive_hits}")
+            return self._build_banner_output(best_candidate["quad"], frame.shape, source="SHAPE",
+                                              text=f"{color.upper()} BANNER", alt_rel=alt_rel, hfov_rad=hfov_rad), all_diagnostics, color_mask
+
+        return None, all_diagnostics, color_mask
+
+    def _build_banner_output(
+        self, quad_full: np.ndarray, frame_shape: Tuple[int, int, int], source: str,
+        text: str, alt_rel: float, hfov_rad: float
+    ) -> Dict[str, Any]:
+        """Calculates center, corner coordinates, and rotated long-axis reconstruction if partial."""
+        full_h, full_w = frame_shape[:2]
+        pts = order_corners(quad_full)
+
+        # Identify long edge and unit vector
+        e1 = pts[1] - pts[0]
+        e2 = pts[3] - pts[0]
+        len1 = np.hypot(e1[0], e1[1])
+        len2 = np.hypot(e2[0], e2[1])
+        if len1 >= len2:
+            v_long = e1
+            l_vis = len1
+        else:
+            v_long = e2
+            l_vis = len2
+
+        u_long = v_long / max(1e-4, l_vis)
+        banner_angle = math.atan2(float(v_long[1]), float(v_long[0]))
         if banner_angle >= math.pi / 2.0:
             banner_angle -= math.pi
         elif banner_angle < -math.pi / 2.0:
             banner_angle += math.pi
 
-        # 5. Check if banner is truncated by image border (partial view)
-        bx0, by0 = float(quad[:, 0].min()), float(quad[:, 1].min())
-        bx1, by1 = float(quad[:, 0].max()), float(quad[:, 1].max())
-        m = 4
-        cut_l, cut_r = (bx0 <= m), (bx1 >= W - 1 - m)
-        cut_t, cut_b = (by0 <= m), (by1 >= H - 1 - m)
-        is_partial = cut_l or cut_r or cut_t or cut_b
+        # Check border cut
+        bx0, by0 = float(pts[:, 0].min()), float(pts[:, 1].min())
+        bx1, by1 = float(pts[:, 0].max()), float(pts[:, 1].max())
+        m = 8.0
+        cut = (bx0 <= m or bx1 >= full_w - 1 - m or by0 <= m or by1 >= full_h - 1 - m)
 
-        u, v = float(quad[:, 0].mean()), float(quad[:, 1].mean())
+        u = float(pts[:, 0].mean())
+        v = float(pts[:, 1].mean())
 
-        # 6. Reconstruct true center if cut off at border using physical length
-        mpp = metres_per_pixel(alt_m, W, hfov_rad)
-        len_px = BANNER_LENGTH_M / mpp
-        wid_px = BANNER_WIDTH_M / mpp
-        if cut_l and not cut_r:
-            u = bx1 - len_px / 2.0
-        elif cut_r and not cut_l:
-            u = bx0 + len_px / 2.0
-        if cut_t and not cut_b:
-            v = by1 - wid_px / 2.0
-        elif cut_b and not cut_t:
-            v = by0 + wid_px / 2.0
+        # If partial and OCR detected: reconstruct center along rotated long axis
+        if cut and source == "OCR":
+            mpp = metres_per_pixel(alt_rel, full_w, hfov_rad)
+            l_exp = BANNER_LENGTH_M / mpp
+            # Find the two ends of the rotated board
+            end_a = (pts[0] + pts[3]) * 0.5
+            end_b = (pts[1] + pts[2]) * 0.5
+            # Margin distance for each end
+            d_a = min(end_a[0], full_w - end_a[0], end_a[1], full_h - end_a[1])
+            d_b = min(end_b[0], full_w - end_b[0], end_b[1], full_h - end_b[1])
+            if d_a < d_b:  # End A is cut, End B is inside
+                dir_vec = (end_a - end_b) / max(1e-4, np.hypot(*(end_a - end_b)))
+                true_c = end_b + dir_vec * (l_exp * 0.5)
+            else:          # End B is cut, End A is inside
+                dir_vec = (end_b - end_a) / max(1e-4, np.hypot(*(end_b - end_a)))
+                true_c = end_a + dir_vec * (l_exp * 0.5)
+            u, v = float(true_c[0]), float(true_c[1])
 
         return {
             "u": u,
             "v": v,
-            "quad": quad,
+            "quad": pts,
             "angle": banner_angle,
-            "partial": is_partial,
+            "partial": cut,
             "source": source,
-            "text": text_label,
-            "size": (W, H)
+            "text": text,
+            "size": (full_w, full_h)
         }
 
 
 # ==============================================================================
-# 4. QR CODE EXTRACTION & 4-ROTATION INVARIANT SIMILARITY ENGINE
+# 5. ROTATION-INVARIANT QR ENGINE (NO MODIFICATION AS SPECIFIED)
 # ==============================================================================
 
 def extract_qr_features(gray: np.ndarray, quad_pts: np.ndarray, grid_size: int = 21) -> Tuple[np.ndarray, np.ndarray]:
@@ -478,7 +721,7 @@ def compute_similarity(grid_ref: np.ndarray, grid_cand: np.ndarray) -> float:
 
 
 # ==============================================================================
-# 5. ARDUPILOT FLIGHT CONTROLLER INTERFACE (MAVLINK 2)
+# 6. ARDUPILOT MAVLINK DRONE CONTROLLER (STRICT GUIDED_NOGPS ON BENCH)
 # ==============================================================================
 
 class DummyMav:
@@ -489,7 +732,7 @@ class DummyMav:
 class DummyMAVLinkConnection:
     def __init__(self):
         self.mav = DummyMav()
-        self.flightmode = "GUIDED"
+        self.flightmode = "GUIDED_NOGPS"
         self.target_system = 1
         self.target_component = 1
 
@@ -575,7 +818,7 @@ class DroneController:
         self.ned = [0.0, 0.0, 0.0]
         self.yaw = 0.0
         self.armed = False
-        self.flightmode = "UNKNOWN"
+        self.flightmode = "GUIDED_NOGPS" if self.use_nogps else "UNKNOWN"
         self._last_hb = time.time()
 
         if self.spin_motors:
@@ -584,7 +827,6 @@ class DroneController:
                 self.sys, self.comp,
                 mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS, 20, 1
             )
-            # Temporarily set DISARM_DELAY to 0.0 on bench to prevent auto-disarm
             self.m.mav.param_set_send(self.sys, self.comp, b"DISARM_DELAY", 0.0, mavutil.mavlink.MAV_PARAM_TYPE_REAL32)
             self._att_running = True
             self._att_thread = threading.Thread(target=self._attitude_streaming_loop, daemon=True)
@@ -751,15 +993,13 @@ class DroneController:
         time.sleep(0.2)
         self.poll()
 
-    def setpoint(self, north: float, east: float, down: float, yaw: Optional[float] = None):
-        """Sends MAVLink local NED position target with optional heading lock."""
+    def setpoint(self, north: float, east: float, down: float, yaw: float):
+        """
+        Sends Local NED position target with heading lock.
+        CRITICAL: ALWAYS sends yaw with 0b100111111000 so ArduPilot holds heading.
+        """
+        type_mask = 0b100111111000  # use position + yaw; ignore vel, accel, yaw-rate
         if not self.spin_motors:
-            if yaw is not None:
-                type_mask = 0b100111111000  # use position + yaw
-                yaw_cmd = yaw
-            else:
-                type_mask = 0b110111111000  # use position only
-                yaw_cmd = 0.0
             self.m.mav.set_position_target_local_ned_send(
                 0, self.sys, self.comp,
                 mavutil.mavlink.MAV_FRAME_LOCAL_NED,
@@ -767,7 +1007,7 @@ class DroneController:
                 north, east, down,
                 0, 0, 0,
                 0, 0, 0,
-                yaw_cmd, 0
+                yaw, 0
             )
 
         if self.bench_sim:
@@ -790,13 +1030,12 @@ class DroneController:
             else:
                 self.sim_ned[2] = down
 
-            if yaw is not None:
-                self.yaw = yaw
+            self.yaw = yaw
             self.ned = list(self.sim_ned)
 
     def land(self):
         print("[DRONE] Commanding LAND...")
-        if self.spin_motors:
+        if self.spin_motors or self.use_nogps:
             print("[DRONE] Ramping down motor throttle safely...")
             t_ramp = time.time()
             init_thrust = self.thrust
@@ -827,29 +1066,7 @@ class DroneController:
 
 
 # ==============================================================================
-# 6. LAWNMOWER SERPENTINE ROUTE GENERATOR
-# ==============================================================================
-
-def build_lawnmower_route(
-    north_start: float, north_end: float,
-    east_start: float, east_end: float,
-    step: float = 4.0
-) -> List[Tuple[float, float]]:
-    """Generates a serpentine survey grid starting at (north_start, east_start)."""
-    route = []
-    east_cols = np.arange(east_start, east_end + (0.1 if east_end >= east_start else -0.1),
-                          step if east_end >= east_start else -step)
-    heading_north = True
-    for e in east_cols:
-        n0, n1 = (north_start, north_end) if heading_north else (north_end, north_start)
-        route.append((float(n0), float(e)))
-        route.append((float(n1), float(e)))
-        heading_north = not heading_north
-    return route
-
-
-# ==============================================================================
-# 7. MASTER FLIGHT MISSION CONTROLLER (12-STAGE ORCHESTRATION)
+# 7. MASTER FLIGHT MISSION CONTROLLER
 # ==============================================================================
 
 class BannerCorridorQRMission:
@@ -875,8 +1092,8 @@ class BannerCorridorQRMission:
         self.worker = SiyiStreamWorker(capture_source=cam_src)
 
         # Vision Engines
-        print("[VISION] Initializing Dual Banner Detector & QR Engines...")
-        self.banner_detector = BannerDetector(ocr_threads=args.ocr_threads, verbose=args.verbose)
+        print("[VISION] Initializing Banner Detector & QR Engines...")
+        self.banner_detector = BannerDetector(args, verbose=args.verbose)
         self.qr_detector = cv2.QRCodeDetector()
         try:
             from pyzbar.pyzbar import decode as pyzbar_decode
@@ -884,17 +1101,22 @@ class BannerCorridorQRMission:
         except ImportError:
             self.pyzbar_decode = None
 
-        # Mission State Caches
+        # Mission State Variables
         self.ref_grid = None
         self.ref_warped = None
         self.ref_text = ""
+        self.skip_field_qr = False
+
         self.state_text = "INITIALIZING"
+        self.takeoff_ned = [0.0, 0.0, 0.0]
+        self.takeoff_yaw = 0.0
+        self.current_yaw_lock = 0.0
+        self.corridor_heading = 0.0
         self.sway_x = 0.0
+
         self.green_banner_ned = [0.0, 0.0, 0.0]
         self.blue_banner_ned = [0.0, 0.0, 0.0]
         self.hud_countdown = 0.0
-        self.hud_score = 0.0
-        self.active_banner_color = "green"
 
         # Bounding box visual retention cache
         self.last_target_pts = None
@@ -907,6 +1129,11 @@ class BannerCorridorQRMission:
         if self.show_gui:
             cv2.namedWindow("AeroTHON Real-World Mission HUD", cv2.WINDOW_NORMAL)
             cv2.resizeWindow("AeroTHON Real-World Mission HUD", 960, 540)
+
+    @property
+    def alt_rel(self) -> float:
+        """Altitude relative to the takeoff pad in meters."""
+        return -(self.drone.ned[2] - self.takeoff_ned[2])
 
     # ------------------------------------------------------------------
     # Visual HUD Overlay
@@ -996,10 +1223,10 @@ class BannerCorridorQRMission:
         # Header status bar
         cv2.rectangle(vis, (0, 0), (w, 38), (20, 20, 20), -1)
         cv2.putText(vis, f"MISSION: {self.state_text}", (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2)
-        alt_str = f"Alt: {-self.drone.ned[2]:.2f}m | NED: ({self.drone.ned[0]:+.1f}, {self.drone.ned[1]:+.1f}) | {self.drone.flightmode}"
+        alt_str = f"Alt: {self.alt_rel:.2f}m | NED: ({self.drone.ned[0]:+.1f}, {self.drone.ned[1]:+.1f}) | {self.drone.flightmode}"
         cv2.putText(vis, alt_str, (max(300, w - 460), 26), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 1)
 
-        # Reference QR thumbnail cache
+        # Reference QR thumbnail cache (saved during flight)
         if self.ref_warped is not None:
             thumb = cv2.resize(self.ref_warped, (80, 80))
             thumb_bgr = cv2.cvtColor(thumb, cv2.COLOR_GRAY2BGR) if len(thumb.shape) == 2 else thumb
@@ -1053,13 +1280,14 @@ class BannerCorridorQRMission:
         return ok, pts, gray, text
 
     # ------------------------------------------------------------------
-    # Slewed Setpoint Flight Helper
+    # Slewed Setpoint Flight Helper (Heading Locked)
     # ------------------------------------------------------------------
     def fly_to(
         self, target_ned: List[float], timeout: float = 25.0,
         tol: float = 0.35, speed: Optional[float] = None, yaw: Optional[float] = None
     ) -> bool:
         sp_speed = speed or self.args.speed
+        yaw_cmd = self.current_yaw_lock if yaw is None else yaw
         cur_sp = list(self.drone.ned)
         dt = 0.05
         t0 = time.time()
@@ -1067,7 +1295,6 @@ class BannerCorridorQRMission:
         while time.time() - t0 < timeout:
             self.drone.poll()
             self.update_hud()
-            dist_3d = math.dist(target_ned, self.drone.ned)
             dist_h = math.hypot(target_ned[0] - self.drone.ned[0], target_ned[1] - self.drone.ned[1])
             dist_v = abs(target_ned[2] - self.drone.ned[2])
             if dist_h < tol and dist_v < 0.4:
@@ -1083,7 +1310,11 @@ class BannerCorridorQRMission:
             now_t = time.time()
             if self.drone.spin_motors and (now_t - last_log >= 1.5):
                 last_log = now_t
-                print(f"  [MOTORS FLY] ESC: M1={self.drone.servos[0]} M2={self.drone.servos[1]} M3={self.drone.servos[2]} M4={self.drone.servos[3]} | Tilt: Pitch={self.drone.cmd_pitch_deg:+.1f} Roll={self.drone.cmd_roll_deg:+.1f}")
+                rps1 = max(0, int((self.drone.servos[0] - 1000) * 0.12))
+                rps2 = max(0, int((self.drone.servos[1] - 1000) * 0.12))
+                rps3 = max(0, int((self.drone.servos[2] - 1000) * 0.12))
+                rps4 = max(0, int((self.drone.servos[3] - 1000) * 0.12))
+                print(f"  [MOTORS FLY] ESC: M1={self.drone.servos[0]}(~{rps1}rps) M2={self.drone.servos[1]}(~{rps2}rps) M3={self.drone.servos[2]}(~{rps3}rps) M4={self.drone.servos[3]}(~{rps4}rps) | Cmd Tilt: Pitch={self.drone.cmd_pitch_deg:+.1f} Roll={self.drone.cmd_roll_deg:+.1f}")
 
             # Slew horizontal setpoint
             d_sp_h = math.hypot(target_ned[0] - cur_sp[0], target_ned[1] - cur_sp[1])
@@ -1100,16 +1331,16 @@ class BannerCorridorQRMission:
             else:
                 cur_sp[2] = target_ned[2]
 
-            self.drone.setpoint(*cur_sp, yaw=yaw)
+            self.drone.setpoint(cur_sp[0], cur_sp[1], cur_sp[2], yaw=yaw_cmd)
             time.sleep(dt)
         return False
 
     # ------------------------------------------------------------------
-    # Closed-Loop PBVS Centering for Banners
+    # Closed-Loop PBVS Centering for Banners (Re-evaluates B2 Every Step)
     # ------------------------------------------------------------------
     def center_over_banner(
         self, color: str = "green", target_ned: Optional[List[float]] = None,
-        max_iters: int = 6, tol_px: float = 25.0
+        max_iters: int = 6, tol_px: float = 25.0, expected_heading: float = 0.0
     ) -> Tuple[List[float], bool]:
         self.state_text = f"{color.upper()} BANNER CENTERING"
         target = list(target_ned if target_ned is not None else self.drone.ned)
@@ -1122,14 +1353,14 @@ class BannerCorridorQRMission:
                 time.sleep(0.08)
                 continue
 
-            meas = self.banner_detector.detect(
-                frame, color=color, alt_m=-self.drone.ned[2], hfov_rad=self.args.hfov_rad
+            meas, diags, _ = self.banner_detector.detect(
+                frame, color=color, alt_rel=self.alt_rel, hfov_rad=self.args.hfov_rad
             )
             if meas is None:
-                print(f"[CENTERING] Iter {iteration}/{max_iters}: {color} banner not visible, holding...")
+                print(f"[CENTERING] Iter {iteration}/{max_iters}: {color.upper()} banner not classified, holding position...")
                 if self.drone.spin_motors:
                     self.drone.set_attitude(0.0, 0.0)
-                self.fly_to(target, timeout=1.0)
+                self.fly_to(target, timeout=1.0, yaw=self.current_yaw_lock)
                 continue
 
             fw, fh = meas["size"]
@@ -1138,7 +1369,7 @@ class BannerCorridorQRMission:
             err_v = meas["v"] - cy
             err_px = math.hypot(err_u, err_v)
 
-            # Active visual servoing tilt commanded directly to motors
+            # Active motor tilt proportional to visual error
             if self.drone.spin_motors:
                 tilt_r = max(-8.0, min(8.0, (err_u / (fw * 0.5)) * 7.5))
                 tilt_p = max(-8.0, min(8.0, -(err_v / (fh * 0.5)) * 7.5))
@@ -1149,19 +1380,39 @@ class BannerCorridorQRMission:
                 rps4 = max(0, int((self.drone.servos[3] - 1000) * 0.12))
                 print(f"  [ALIGN TILT] {color.upper()} Banner Offset: ({err_u:+.1f}, {err_v:+.1f})px | Cmd Tilt: Roll={tilt_r:+.1f}° Pitch={tilt_p:+.1f}° | ESC: M1={self.drone.servos[0]}(~{rps1}rps) M2={self.drone.servos[1]}(~{rps2}rps) M3={self.drone.servos[2]}(~{rps3}rps) M4={self.drone.servos[3]}(~{rps4}rps)")
 
-            print(f"[CENTERING] Iter {iteration}/{max_iters}: centroid ({meas['u']:.1f}, {meas['v']:.1f})px | Offset: {err_px:.1f}px | {'PARTIAL' if meas['partial'] else 'FULL'}")
+            print(f"[CENTERING] Iter {iteration}/{max_iters}: centroid ({meas['u']:.1f}, {meas['v']:.1f})px | Offset: {err_px:.1f}px | {'PARTIAL' if meas['partial'] else 'FULL-VIEW'}")
 
             self.update_hud(target_pts=meas["quad"], target_type=f"{color.upper()}_BANNER", subtext=meas["source"])
 
+            # Resolve 180° banner long-axis ambiguity to determine corridor heading
+            # Long-side angle in world frame:
+            theta_world = wrap_pi(self.drone.yaw + meas["angle"])
+            psi1 = wrap_pi(theta_world + math.pi / 2.0)
+            psi2 = wrap_pi(theta_world - math.pi / 2.0)
+            diff1 = abs(wrap_pi(psi1 - expected_heading))
+            diff2 = abs(wrap_pi(psi2 - expected_heading))
+            cand_heading = psi1 if diff1 < diff2 else psi2
+            min_diff = min(diff1, diff2)
+
+            # Reject heading corrections > 25° from expected heading
+            if min_diff <= math.radians(25.0):
+                self.current_yaw_lock = cand_heading
+                if color.lower() == "green":
+                    self.corridor_heading = cand_heading
+                print(f"  [HEADING ALIGN] Heading locked to corridor axis: {math.degrees(self.current_yaw_lock):+.1f}° (Corr: {math.degrees(min_diff):.1f}° <= 25°)")
+            else:
+                print(f"  [HEADING WARN] Heading diff {math.degrees(min_diff):.1f}° > 25°. Retaining expected heading {math.degrees(expected_heading):.1f}°.")
+
+            # Lock declared ONLY when fully inside frame and centered within tolerance
             if err_px <= tol_px and not meas["partial"]:
-                print(f"[CENTERING] Lock acquired! Centroid offset ({err_px:.1f}px) <= tol ({tol_px:.1f}px).")
+                print(f"[CENTERING] Lock acquired! Centroid offset ({err_px:.1f}px) <= tol ({tol_px:.1f}px) & Full-View verified.")
                 if self.drone.spin_motors:
                     self.drone.set_attitude(0.0, 0.0)
                 locked = True
                 break
 
             dn, de = pixel_to_ned_offset(
-                meas["u"], meas["v"], fw, fh, -self.drone.ned[2], self.drone.yaw, self.args.hfov_rad
+                meas["u"], meas["v"], fw, fh, self.alt_rel, self.drone.yaw, self.args.hfov_rad
             )
             target[0] += dn * 0.70
             target[1] += de * 0.70
@@ -1169,7 +1420,7 @@ class BannerCorridorQRMission:
             t_settle = time.time()
             while time.time() - t_settle < 1.0:
                 self.drone.poll()
-                self.drone.setpoint(*target)
+                self.drone.setpoint(target[0], target[1], target[2], yaw=self.current_yaw_lock)
                 self.update_hud(target_pts=meas["quad"], target_type=f"{color.upper()}_BANNER")
                 time.sleep(0.05)
 
@@ -1182,7 +1433,7 @@ class BannerCorridorQRMission:
         a = self.args
 
         # ==============================================================
-        # STAGE 1: Autonomous Takeoff to 5.0m AGL
+        # STAGE 1: Autonomous Takeoff & Heading Recording
         # ==============================================================
         print(f"\n{'='*70}\nSTAGE 1: TAKEOFF TO {a.alt:.1f}m AGL\n{'='*70}")
         self.state_text = f"STAGE 1: TAKEOFF ({a.alt:.1f}m)"
@@ -1192,35 +1443,47 @@ class BannerCorridorQRMission:
         while time.time() - t0 < 25.0:
             self.drone.poll()
             self.update_hud()
-            curr_alt = -self.drone.ned[2]
-            print(f"[STATUS] Altitude: {curr_alt:.2f}m / {a.alt:.1f}m", end='\r')
-            if curr_alt >= a.alt * 0.85:
-                print(f"\n[STATUS] Target altitude reached: {curr_alt:.2f}m")
+            print(f"[STATUS] Altitude: {-self.drone.ned[2]:.2f}m / {a.alt:.1f}m", end='\r')
+            if -self.drone.ned[2] >= a.alt * 0.85:
+                print(f"\n[STATUS] Target altitude reached: {-self.drone.ned[2]:.2f}m")
                 break
             time.sleep(0.08)
 
-        # Hover stabilization at (0, 0)
+        # Record takeoff reference frame (No hard-coded North/West)
+        self.takeoff_ned = list(self.drone.ned)
+        self.takeoff_yaw = self.drone.yaw
+        self.current_yaw_lock = self.takeoff_yaw
+        print(f"[REFERENCE FRAME] Takeoff Origin: N={self.takeoff_ned[0]:+.2f}m, E={self.takeoff_ned[1]:+.2f}m, Heading={math.degrees(self.takeoff_yaw):+.1f}°")
+
+        # Hover stabilization over takeoff pad
         t_stab = time.time()
         while time.time() - t_stab < 1.5:
             self.drone.poll()
-            self.drone.setpoint(0.0, 0.0, -a.alt, yaw=0.0)
+            self.drone.setpoint(self.takeoff_ned[0], self.takeoff_ned[1], self.takeoff_ned[2] - a.alt, yaw=self.takeoff_yaw)
             self.update_hud()
             time.sleep(0.05)
 
+        # Body axes relative to takeoff heading
+        fwd_tk, left_tk, right_tk = get_body_axes(self.takeoff_yaw)
+
         # ==============================================================
-        # STAGE 2: Surge 1 & Memorize Reference QR
+        # STAGE 2: Surge 1 & Scan Reference QR (Camera Only, No Disk Loading)
         # ==============================================================
-        print(f"\n{'='*70}\nSTAGE 2: SURGE 1 ({a.surge1:.1f}m) & SCAN REFERENCE QR\n{'='*70}")
+        print(f"\n{'='*70}\nSTAGE 2: SURGE 1 ({a.surge1:.1f}m) & SCAN REFERENCE QR (CAMERA ONLY)\n{'='*70}")
         self.state_text = f"STAGE 2: SURGE 1 ({a.surge1:.1f}m)"
-        sp_surge1 = [a.surge1, 0.0, -a.alt]
-        self.fly_to(sp_surge1, timeout=12.0)
+        sp_surge1 = [
+            self.takeoff_ned[0] + fwd_tk[0] * a.surge1,
+            self.takeoff_ned[1] + fwd_tk[1] * a.surge1,
+            self.takeoff_ned[2] - a.alt
+        ]
+        self.fly_to(sp_surge1, timeout=12.0, yaw=self.takeoff_yaw)
 
         self.state_text = "STAGE 2: SCANNING REFERENCE QR"
-        print("[DRONE] Scanning takeoff reference QR code...")
+        print(f"[DRONE] Scanning takeoff reference QR code from camera (timeout: {a.ref_qr_timeout:.1f}s)...")
         t_qr = time.time()
-        while self.ref_grid is None and time.time() - t_qr < 12.0:
+        while self.ref_grid is None and (time.time() - t_qr) < a.ref_qr_timeout:
             self.drone.poll()
-            self.drone.setpoint(*sp_surge1, yaw=0.0)
+            self.drone.setpoint(sp_surge1[0], sp_surge1[1], sp_surge1[2], yaw=self.takeoff_yaw)
             frame = self.worker.get_frame()
             if frame is not None:
                 ok, pts, gray, text = self.detect_qr(frame)
@@ -1229,88 +1492,111 @@ class BannerCorridorQRMission:
                     self.ref_grid = grid
                     self.ref_warped = warped
                     self.ref_text = text
+                    # Save snapshot for logging only (NEVER read back from disk)
                     save_path = "/home/suasrasp/aerothon_ws/reference_qr_memorized.png"
                     cv2.imwrite(save_path, warped)
-                    print(f"\n[SUCCESS] REFERENCE QR MEMORIZED! Payload: '{self.ref_text}'")
+                    print(f"\n[SUCCESS] REFERENCE QR MEMORIZED FROM CAMERA! Payload: '{self.ref_text}'")
                     self.update_hud(target_pts=pts, target_type="QR", score_or_dist=1.0)
                     break
                 self.update_hud()
             time.sleep(0.08)
 
+        # Section A3: If reference QR not seen within timeout, skip field QR search & 15s hover entirely!
         if self.ref_grid is None:
-            print("[WARN] Visual scan timed out. Loading reference fallback model...")
-            ref_path = "/home/suasrasp/aerothon_ws/reference_qr_memorized.png"
-            if not os.path.exists(ref_path):
-                ref_path = "/home/suasrasp/aerothon_ws/src/aerothon_sim/models/qr_initial/materials/textures/qr_initial.png"
-            if os.path.exists(ref_path):
-                ref_img = cv2.imread(ref_path, cv2.IMREAD_GRAYSCALE)
-                ok, pts = self.qr_detector.detect(ref_img)
-                if ok and pts is not None:
-                    self.ref_grid, self.ref_warped = extract_qr_features(ref_img, pts, grid_size=21)
-                    self.ref_text = "AEROTHON_REF"
-                    print("[VISION] Reference QR loaded from cached file fallback!")
+            print("\n" + "!" * 70)
+            print("[WARN] Reference QR NOT detected from camera within scan timeout!")
+            print("[WARN] Field QR reconnaissance (Stage 9) and 15s hover (Stage 10) will be SKIPPED.")
+            print("[WARN] Continuing directly to corridor transit & return corridor stage.")
+            print("!" * 70 + "\n")
+            self.skip_field_qr = True
 
         # ==============================================================
-        # STAGE 3: Surge 2 Forward
+        # STAGE 3: Surge 2 Forward along Takeoff Heading
         # ==============================================================
-        surge2_north = a.surge1 + a.surge2
-        print(f"\n{'='*70}\nSTAGE 3: SURGE 2 ({a.surge2:.1f}m) -> North={surge2_north:.1f}m\n{'='*70}")
+        total_surge_dist = a.surge1 + a.surge2
+        print(f"\n{'='*70}\nSTAGE 3: SURGE 2 ({a.surge2:.1f}m) -> Total Forward = {total_surge_dist:.1f}m\n{'='*70}")
         self.state_text = f"STAGE 3: SURGE 2 ({a.surge2:.1f}m)"
-        sp_surge2 = [surge2_north, 0.0, -a.alt]
-        self.fly_to(sp_surge2, timeout=12.0)
+        sp_surge2 = [
+            self.takeoff_ned[0] + fwd_tk[0] * total_surge_dist,
+            self.takeoff_ned[1] + fwd_tk[1] * total_surge_dist,
+            self.takeoff_ned[2] - a.alt
+        ]
+        self.fly_to(sp_surge2, timeout=12.0, yaw=self.takeoff_yaw)
 
         # ==============================================================
-        # STAGE 4: Sway Left (West / Body -Y) & Search Green Banner
+        # STAGE 4: Sway Left (Takeoff Frame) & Search Green Banner
         # ==============================================================
-        print(f"\n{'='*70}\nSTAGE 4: SWAY LEFT (max {a.max_sway:.1f}m) & DETECT GREEN BANNER\n{'='*70}")
+        print(f"\n{'='*70}\nSTAGE 4: SWAY LEFT (max {a.max_sway:.1f}m) & DETECT GREEN BANNER (#00B140)\n{'='*70}")
         self.state_text = "STAGE 4: SWAY LEFT (SEARCH GREEN BANNER)"
         found_banner = None
-        cur_e = 0.0
+        cur_sway_dist = 0.0
         dt = 0.05
-        t_sway = time.time()
 
-        while abs(cur_e) <= a.max_sway:
+        while cur_sway_dist <= a.max_sway:
             self.drone.poll()
             frame = self.worker.get_frame()
             if frame is not None:
-                meas = self.banner_detector.detect(
-                    frame, color="green", alt_m=-self.drone.ned[2], hfov_rad=a.hfov_rad
+                meas, diags, _ = self.banner_detector.detect(
+                    frame, color="green", alt_rel=self.alt_rel, hfov_rad=a.hfov_rad
                 )
                 if meas is not None:
                     found_banner = meas
                     self.update_hud(target_pts=meas["quad"], target_type="GREEN_BANNER", subtext=meas["source"])
-                    print(f"\n[BANNER DETECTED!] Type: GREEN | Source: {meas['source']} | Current Sway: {abs(self.drone.ned[1]):.2f}m")
+                    print(f"\n[BANNER CLASSIFIED!] Type: GREEN | Source: {meas['source']} | Current Sway: {cur_sway_dist:.2f}m")
                     break
+                # If a region touches the edge, optionally slow down sway
+                for d in diags:
+                    if d.get("touching_edge"):
+                        pass
                 self.update_hud()
 
-            cur_e -= a.sway_speed * dt
-            sp_sway = [surge2_north, cur_e, -a.alt]
-            self.drone.setpoint(*sp_sway, yaw=0.0)
+            cur_sway_dist += a.sway_speed * dt
+            sp_sway = [
+                sp_surge2[0] + left_tk[0] * cur_sway_dist,
+                sp_surge2[1] + left_tk[1] * cur_sway_dist,
+                self.takeoff_ned[2] - a.alt
+            ]
+            self.drone.setpoint(sp_sway[0], sp_sway[1], sp_sway[2], yaw=self.takeoff_yaw)
             if self.drone.spin_motors:
                 self.drone.set_attitude(-4.5, 0.0)  # Tilt left
             time.sleep(dt)
 
+        # Short hover at max sway
         if found_banner is None:
-            if a.bench_sim:
-                print(f"[BENCH-SIM] Green Banner simulated at benchmark sway (North={surge2_north:+.1f}m, East=-7.40m, x=7.4m)")
-                found_banner = {
-                    "u": 640.0, "v": 360.0, "size": (1280, 720),
-                    "source": "BENCH_SIM", "text": "AeroTHON 2026", "partial": False,
-                    "quad": np.array([[200, 300], [900, 300], [900, 380], [200, 380]], dtype=np.float32)
-                }
-                self.drone.sim_ned[1] = -7.40
-                self.drone.ned[1] = -7.40
-            else:
-                print("\n[RESULT] Green Banner not detected within max sway. Commanding LAND...")
-                self.drone.land()
-                return
+            print("[SEARCH] Hovering at max sway to complete persistence check...")
+            t_hover = time.time()
+            while time.time() - t_hover < 3.0:
+                self.drone.poll()
+                frame = self.worker.get_frame()
+                if frame is not None:
+                    meas, _, _ = self.banner_detector.detect(
+                        frame, color="green", alt_rel=self.alt_rel, hfov_rad=a.hfov_rad
+                    )
+                    if meas is not None:
+                        found_banner = meas
+                        break
+                time.sleep(0.08)
 
-        # Instant BRAKE to stop sideways momentum
-        print("[BRAKE] Halting lateral momentum...")
+        # Section B5: Green banner NOT classified -> Fly back to takeoff point and land
+        if found_banner is None:
+            print("\n" + "!" * 70)
+            print("[MISSION ABORT] Green Banner was NOT classified within max sway distance.")
+            print("[MISSION ABORT] Returning safely to takeoff pad to land (NOT landing in field).")
+            print("!" * 70 + "\n")
+            self.state_text = "GREEN BANNER NOT FOUND - RETURNING HOME"
+            if self.drone.spin_motors:
+                self.drone.set_attitude(0.0, 0.0)
+            sp_home = [self.takeoff_ned[0], self.takeoff_ned[1], self.takeoff_ned[2] - a.alt]
+            self.fly_to(sp_home, timeout=25.0, yaw=self.takeoff_yaw)
+            self.drone.land()
+            return
+
+        # Halting lateral momentum
+        print("[BRAKE] Green Banner acquired! Halting lateral momentum...")
         if self.drone.spin_motors:
             self.drone.set_attitude(0.0, 0.0)
         else:
-            self.drone.set_mode("BRAKE")
+            self.drone.set_mode("GUIDED_NOGPS" if self.drone.use_nogps else "BRAKE")
         time.sleep(1.2)
 
         # ==============================================================
@@ -1318,349 +1604,414 @@ class BannerCorridorQRMission:
         # ==============================================================
         print(f"\n{'='*70}\nSTAGE 5: GREEN BANNER ALIGNMENT & MEASURE SWAY x\n{'='*70}")
         self.state_text = "STAGE 5: GREEN BANNER ALIGNMENT"
-        self.drone.set_mode("GUIDED")
+        self.drone.set_mode("GUIDED_NOGPS" if self.drone.use_nogps else "GUIDED")
         time.sleep(0.2)
 
         target_banner_ned = list(self.drone.ned)
-        if found_banner is not None:
-            dn, de = pixel_to_ned_offset(
-                found_banner["u"], found_banner["v"],
-                found_banner["size"][0], found_banner["size"][1],
-                -self.drone.ned[2], self.drone.yaw, a.hfov_rad
-            )
-            target_banner_ned[0] += dn
-            target_banner_ned[1] += de
-            self.fly_to(target_banner_ned, timeout=8.0)
+        dn, de = pixel_to_ned_offset(
+            found_banner["u"], found_banner["v"],
+            found_banner["size"][0], found_banner["size"][1],
+            self.alt_rel, self.drone.yaw, a.hfov_rad
+        )
+        target_banner_ned[0] += dn
+        target_banner_ned[1] += de
+        self.fly_to(target_banner_ned, timeout=8.0, yaw=self.takeoff_yaw)
 
-        # Closed-loop centering
+        # Closed-loop centering re-evaluating B2 shape classification
         target_banner_ned, _ = self.center_over_banner(
-            color="green", target_ned=target_banner_ned, max_iters=a.center_iters, tol_px=a.center_tol
+            color="green", target_ned=target_banner_ned, max_iters=a.center_iters,
+            tol_px=a.center_tol, expected_heading=self.takeoff_yaw
         )
         self.green_banner_ned = list(target_banner_ned)
 
-        # Measure sway distance x (leftward distance from takeoff line)
-        self.sway_x = -self.drone.ned[1]
+        # Section B4: Measure sway distance x along takeoff frame's left axis
+        d_n = self.green_banner_ned[0] - self.takeoff_ned[0]
+        d_e = self.green_banner_ned[1] - self.takeoff_ned[1]
+        self.sway_x = d_n * left_tk[0] + d_e * left_tk[1]
+
         print(f"\n{'*'*70}")
-        print(f"[MEASUREMENT] Green Banner Position: North={self.drone.ned[0]:+.2f}m, East={self.drone.ned[1]:+.2f}m")
+        print(f"[MEASUREMENT] Green Banner Position: North={self.green_banner_ned[0]:+.2f}m, East={self.green_banner_ned[1]:+.2f}m")
+        print(f"[MEASUREMENT] Measured corridor heading = {math.degrees(self.corridor_heading):+.1f}°")
         print(f"[MEASUREMENT] Total leftward sway distance x = {self.sway_x:.2f} meters")
         print(f"{'*'*70}\n")
 
+        # Direction vectors along measured corridor heading
+        fwd_corr, left_corr, right_corr = get_body_axes(self.corridor_heading)
+
         # ==============================================================
-        # STAGE 6: Descend to Corridor Altitude (3.0m AGL)
+        # STAGE 6: Descend to Corridor Altitude (Relative to Takeoff Point)
         # ==============================================================
         print(f"\n{'='*70}\nSTAGE 6: DESCEND TO CORRIDOR ALTITUDE ({a.corridor_alt:.1f}m AGL)\n{'='*70}")
         self.state_text = f"STAGE 6: DESCENDING TO {a.corridor_alt:.1f}m"
-        target_banner_ned[2] = -a.corridor_alt
-        self.fly_to(target_banner_ned, timeout=12.0)
+        target_banner_ned[2] = self.takeoff_ned[2] - a.corridor_alt
+        self.fly_to(target_banner_ned, timeout=12.0, yaw=self.corridor_heading)
         time.sleep(1.0)
 
         # ==============================================================
         # STAGE 7: Surge Forward Through Green Corridor
         # ==============================================================
-        corridor_exit_north = target_banner_ned[0] + a.corridor_surge
-        print(f"\n{'='*70}\nSTAGE 7: SURGE {a.corridor_surge:.1f}m THROUGH CORRIDOR -> North={corridor_exit_north:.1f}m\n{'='*70}")
+        print(f"\n{'='*70}\nSTAGE 7: SURGE {a.corridor_surge:.1f}m THROUGH CORRIDOR (Heading: {math.degrees(self.corridor_heading):+.1f}°)\n{'='*70}")
         self.state_text = f"STAGE 7: SURGE CORRIDOR ({a.corridor_surge:.1f}m)"
-        sp_corridor_end = [corridor_exit_north, target_banner_ned[1], -a.corridor_alt]
-        self.fly_to(sp_corridor_end, timeout=a.corridor_surge / 0.8 + 15.0, speed=0.9)
-        print(f"[CORRIDOR EXIT] Exited corridor at North={self.drone.ned[0]:+.2f}m, East={self.drone.ned[1]:+.2f}m")
+        sp_corridor_end = [
+            target_banner_ned[0] + fwd_corr[0] * a.corridor_surge,
+            target_banner_ned[1] + fwd_corr[1] * a.corridor_surge,
+            self.takeoff_ned[2] - a.corridor_alt
+        ]
+        self.fly_to(sp_corridor_end, timeout=a.corridor_surge / 0.8 + 15.0, speed=0.9, yaw=self.corridor_heading)
+        print(f"[CORRIDOR EXIT] Exited corridor at N={self.drone.ned[0]:+.2f}m, E={self.drone.ned[1]:+.2f}m")
 
         # ==============================================================
-        # STAGE 8: Lateral Positioning: Go Left by (19 - x) meters
+        # STAGE 8: Lateral Positioning: Go Left by (19 - x) meters along corridor axis
         # ==============================================================
         wall_sway_step = a.wall_offset - self.sway_x
-        target_wall_east = self.drone.ned[1] - wall_sway_step  # further left (negative East)
-        print(f"\n{'='*70}\nSTAGE 8: LATERAL SHIFT LEFT BY ({a.wall_offset:.1f} - x) = {wall_sway_step:.2f}m (1m from wall)\n{'='*70}")
+        print(f"\n{'='*70}\nSTAGE 8: LATERAL SHIFT LEFT BY ({a.wall_offset:.1f} - x) = {wall_sway_step:.2f}m (1m from 20m wall)\n{'='*70}")
         self.state_text = f"STAGE 8: MOVE LEFT {wall_sway_step:.2f}m"
-        print(f"[NAVIGATION] Target East coordinate: {target_wall_east:+.2f}m (1m away from wall at -20m)")
 
-        # Climb back to survey altitude
-        sp_wall = [self.drone.ned[0] + 1.0, target_wall_east, -a.alt]
-        self.fly_to(sp_wall, timeout=20.0)
-        print(f"[SURVEY ZONE ENTRY] Positioned at North={self.drone.ned[0]:+.2f}m, East={self.drone.ned[1]:+.2f}m")
+        sp_wall = [
+            self.drone.ned[0] + left_corr[0] * wall_sway_step + fwd_corr[0] * 1.0,
+            self.drone.ned[1] + left_corr[1] * wall_sway_step + fwd_corr[1] * 1.0,
+            self.takeoff_ned[2] - a.alt  # Climb back to transit altitude
+        ]
+        self.fly_to(sp_wall, timeout=20.0, yaw=self.corridor_heading)
+        print(f"[SURVEY ZONE ENTRY] Positioned at N={self.drone.ned[0]:+.2f}m, E={self.drone.ned[1]:+.2f}m")
 
         # ==============================================================
-        # STAGE 9: Lawnmower Search Pattern for Candidate QR
+        # STAGES 9 & 10: QR Lawnmower Reconnaissance & 15s Hover
         # ==============================================================
-        n_start = self.drone.ned[0]
-        n_end = n_start + a.lawnmower_length
-        e_start = self.drone.ned[1]
-        e_end = -1.0  # Sweep from near-wall East (-19m) across toward center
-
-        route = build_lawnmower_route(
-            north_start=n_start, north_end=n_end,
-            east_start=e_start, east_end=e_end,
-            step=a.step
-        )
-        print(f"\n{'='*70}\nSTAGE 9: LAWNMOWER QR RECONNAISSANCE ({len(route)} WAYPOINTS)\n{'='*70}")
-        self.state_text = "STAGE 9: LAWNMOWER QR SEARCH"
-
         target_qr_ned = None
-        for wp_idx, (wp_n, wp_e) in enumerate(route):
-            tgt_ned = [wp_n, wp_e, -a.alt]
-            print(f"[WAYPOINT {wp_idx+1}/{len(route)}] Target: North={wp_n:+.1f}m, East={wp_e:+.1f}m")
-            cur_sp = list(self.drone.ned)
-            dt = 0.05
 
-            while True:
-                self.drone.poll()
-                if self.drone.spin_motors and not self.drone.armed:
-                    self.drone.rearm()
+        if self.skip_field_qr or self.ref_grid is None:
+            print("\n" + "=" * 70)
+            print("[STAGE 9 & 10 SKIPPED] Reference QR was not acquired. Proceeding straight to Return Corridor.")
+            print("=" * 70 + "\n")
+        else:
+            # Build lawnmower grid aligned with corridor heading and lateral stepping
+            print(f"\n{'='*70}\nSTAGE 9: LAWNMOWER QR RECONNAISSANCE ALONG CORRIDOR AXIS\n{'='*70}")
+            self.state_text = "STAGE 9: LAWNMOWER QR SEARCH"
 
-                frame = self.worker.get_frame()
-                detected_pts = None
-                sim_score = 0.0
-                is_match = False
+            # Create waypoints spanning lawnmower_length forward and stepping rightwards
+            n_rows = 5
+            row_step = a.step
+            lawnmower_wps = []
+            heading_fwd = True
+            for r in range(n_rows):
+                lat_offset = r * row_step
+                p0 = [
+                    sp_wall[0] + right_corr[0] * lat_offset,
+                    sp_wall[1] + right_corr[1] * lat_offset,
+                    self.takeoff_ned[2] - a.alt
+                ]
+                p1 = [
+                    p0[0] + fwd_corr[0] * a.lawnmower_length,
+                    p0[1] + fwd_corr[1] * a.lawnmower_length,
+                    self.takeoff_ned[2] - a.alt
+                ]
+                if heading_fwd:
+                    lawnmower_wps.append(p0)
+                    lawnmower_wps.append(p1)
+                else:
+                    lawnmower_wps.append(p1)
+                    lawnmower_wps.append(p0)
+                heading_fwd = not heading_fwd
 
-                if frame is not None and self.ref_grid is not None:
-                    ok, detected_pts, gray, cand_txt = self.detect_qr(frame)
-                    if ok and detected_pts is not None and len(detected_pts) > 0:
-                        cand_grid, _ = extract_qr_features(gray, detected_pts, grid_size=21)
-                        sim_score = compute_similarity(self.ref_grid, cand_grid)
+            for wp_idx, tgt_ned in enumerate(lawnmower_wps):
+                print(f"[WAYPOINT {wp_idx+1}/{len(lawnmower_wps)}] Target: N={tgt_ned[0]:+.1f}m, E={tgt_ned[1]:+.1f}m")
+                cur_sp = list(self.drone.ned)
+                dt = 0.05
 
-                        if cand_txt and self.ref_text and cand_txt == self.ref_text:
-                            is_match = True
-                            sim_score = 1.0
-                        elif sim_score >= a.match_thresh:
-                            is_match = True
+                while True:
+                    self.drone.poll()
+                    if self.drone.spin_motors and not self.drone.armed:
+                        self.drone.rearm()
 
-                        if is_match:
-                            p = detected_pts.reshape(-1, 2)
-                            q_u, q_v = float(np.mean(p[:, 0])), float(np.mean(p[:, 1]))
-                            fw, fh = frame.shape[1], frame.shape[0]
-                            dn, de = pixel_to_ned_offset(
-                                q_u, q_v, fw, fh, -self.drone.ned[2], self.drone.yaw, a.hfov_rad
-                            )
-                            target_qr_ned = [self.drone.ned[0] + dn, self.drone.ned[1] + de, -a.alt]
+                    frame = self.worker.get_frame()
+                    detected_pts = None
+                    sim_score = 0.0
+                    is_match = False
 
-                            print(f"\n{'!'*70}")
-                            print(f"[MATCH FOUND!] Candidate Similarity: {sim_score*100:.1f}% | Payload: '{cand_txt}'")
-                            print(f"[TARGET QR ESTIMATE] North={target_qr_ned[0]:+.2f}m, East={target_qr_ned[1]:+.2f}m")
-                            print(f"{'!'*70}\n")
+                    if frame is not None and self.ref_grid is not None:
+                        ok, detected_pts, gray, cand_txt = self.detect_qr(frame)
+                        if ok and detected_pts is not None and len(detected_pts) > 0:
+                            cand_grid, _ = extract_qr_features(gray, detected_pts, grid_size=21)
+                            sim_score = compute_similarity(self.ref_grid, cand_grid)
 
-                            print("[BRAKE] Target QR matched! Freezing momentum...")
-                            if self.drone.spin_motors:
-                                self.drone.set_attitude(0.0, 0.0)
-                            else:
-                                self.drone.set_mode("BRAKE")
-                            self.update_hud(target_pts=detected_pts, target_type="QR", score_or_dist=sim_score)
-                            break
+                            if cand_txt and self.ref_text and cand_txt == self.ref_text:
+                                is_match = True
+                                sim_score = 1.0
+                            elif sim_score >= a.match_thresh:
+                                is_match = True
 
-                self.update_hud(target_pts=detected_pts, target_type="QR", score_or_dist=sim_score)
+                            if is_match:
+                                p = detected_pts.reshape(-1, 2)
+                                q_u, q_v = float(np.mean(p[:, 0])), float(np.mean(p[:, 1]))
+                                fw, fh = frame.shape[1], frame.shape[0]
+                                dn, de = pixel_to_ned_offset(
+                                    q_u, q_v, fw, fh, self.alt_rel, self.drone.yaw, a.hfov_rad
+                                )
+                                target_qr_ned = [self.drone.ned[0] + dn, self.drone.ned[1] + de, self.takeoff_ned[2] - a.alt]
+
+                                print(f"\n{'!'*70}")
+                                print(f"[MATCH FOUND!] Candidate Similarity: {sim_score*100:.1f}% | Payload: '{cand_txt}'")
+                                print(f"[TARGET QR ESTIMATE] N={target_qr_ned[0]:+.2f}m, E={target_qr_ned[1]:+.2f}m")
+                                print(f"{'!'*70}\n")
+
+                                print("[BRAKE] Target QR matched! Freezing momentum...")
+                                if self.drone.spin_motors:
+                                    self.drone.set_attitude(0.0, 0.0)
+                                else:
+                                    self.drone.set_mode("GUIDED_NOGPS" if self.drone.use_nogps else "BRAKE")
+                                self.update_hud(target_pts=detected_pts, target_type="QR", score_or_dist=sim_score)
+                                break
+
+                    self.update_hud(target_pts=detected_pts, target_type="QR", score_or_dist=sim_score)
+                    if target_qr_ned is not None:
+                        break
+
+                    dist_to_wp = math.hypot(tgt_ned[0] - self.drone.ned[0], tgt_ned[1] - self.drone.ned[1])
+                    if dist_to_wp < 0.6:
+                        break
+
+                    if self.drone.spin_motors:
+                        wp_dn = tgt_ned[0] - self.drone.ned[0]
+                        wp_de = tgt_ned[1] - self.drone.ned[1]
+                        dist_m = math.hypot(wp_dn, wp_de)
+                        if dist_m > 0.3:
+                            wp_pitch = max(-6.0, min(6.0, -(wp_dn / dist_m) * 5.5))
+                            wp_roll = max(-6.0, min(6.0, (wp_de / dist_m) * 5.5))
+                            self.drone.set_attitude(wp_roll, wp_pitch)
+
+                    d_sp = math.hypot(tgt_ned[0] - cur_sp[0], tgt_ned[1] - cur_sp[1])
+                    step = min(a.speed * dt, d_sp)
+                    if d_sp > 1e-4:
+                        cur_sp[0] += (tgt_ned[0] - cur_sp[0]) * step / d_sp
+                        cur_sp[1] += (tgt_ned[1] - cur_sp[1]) * step / d_sp
+                    cur_sp[2] = self.takeoff_ned[2] - a.alt
+                    self.drone.setpoint(cur_sp[0], cur_sp[1], cur_sp[2], yaw=self.corridor_heading)
+                    time.sleep(dt)
+
                 if target_qr_ned is not None:
                     break
 
-                if a.bench_sim and wp_idx >= 1 and target_qr_ned is None:
-                    print(f"\n[BENCH-SIM] Candidate Twin QR match simulated at Waypoint {wp_idx+1} ({wp_n:+.1f}m, {wp_e:+.1f}m)!")
-                    target_qr_ned = [wp_n, wp_e, -a.alt]
-                    self.drone.sim_ned[0] = wp_n
-                    self.drone.sim_ned[1] = wp_e
-                    self.drone.ned[0] = wp_n
-                    self.drone.ned[1] = wp_e
-                    break
-
-                dist_to_wp = math.hypot(tgt_ned[0] - self.drone.ned[0], tgt_ned[1] - self.drone.ned[1])
-                if dist_to_wp < 0.6:
-                    break
-
-                if self.drone.spin_motors:
-                    wp_dn = tgt_ned[0] - self.drone.ned[0]
-                    wp_de = tgt_ned[1] - self.drone.ned[1]
-                    dist_m = math.hypot(wp_dn, wp_de)
-                    if dist_m > 0.3:
-                        wp_pitch = max(-6.0, min(6.0, -(wp_dn / dist_m) * 5.5))
-                        wp_roll = max(-6.0, min(6.0, (wp_de / dist_m) * 5.5))
-                        self.drone.set_attitude(wp_roll, wp_pitch)
-
-                d_sp = math.hypot(tgt_ned[0] - cur_sp[0], tgt_ned[1] - cur_sp[1])
-                step = min(a.speed * dt, d_sp)
-                if d_sp > 1e-4:
-                    cur_sp[0] += (tgt_ned[0] - cur_sp[0]) * step / d_sp
-                    cur_sp[1] += (tgt_ned[1] - cur_sp[1]) * step / d_sp
-                cur_sp[2] = -a.alt
-                self.drone.setpoint(*cur_sp)
-                time.sleep(dt)
-
+            # STAGE 10: Precision QR Centering & 15-Second Hover Hold
             if target_qr_ned is not None:
-                break
+                print(f"\n{'='*70}\nSTAGE 10: PRECISION CENTERING & 15-SECOND HOVER HOLD\n{'='*70}")
+                self.state_text = "STAGE 10: QR CENTERING & HOVER"
+                self.drone.set_mode("GUIDED_NOGPS" if self.drone.use_nogps else "GUIDED")
+                time.sleep(0.2)
+                self.fly_to(target_qr_ned, timeout=10.0, tol=0.25, yaw=self.corridor_heading)
 
-        if target_qr_ned is None:
-            print("[WARN] Lawnmower sweep finished without matching candidate QR. Using current position.")
-            target_qr_ned = list(self.drone.ned)
+                # Fine Closed-Loop Centering over candidate QR
+                for iteration in range(a.center_iters):
+                    self.drone.poll()
+                    frame = self.worker.get_frame()
+                    if frame is None:
+                        continue
+                    ok, pts, _, cand_txt = self.detect_qr(frame)
+                    if ok and pts is not None and len(pts) > 0:
+                        p = pts.reshape(-1, 2)
+                        u, v = float(np.mean(p[:, 0])), float(np.mean(p[:, 1]))
+                        fw, fh = frame.shape[1], frame.shape[0]
+                        cx, cy = fw / 2.0, fh / 2.0
+                        err_u = u - cx
+                        err_v = v - cy
+                        err_px = math.hypot(err_u, err_v)
 
-        # ==============================================================
-        # STAGE 10: Precision QR Centering & 15-Second Hover Hold
-        # ==============================================================
-        print(f"\n{'='*70}\nSTAGE 10: PRECISION CENTERING & 15-SECOND HOVER HOLD\n{'='*70}")
-        self.state_text = "STAGE 10: QR CENTERING & HOVER"
-        self.drone.set_mode("GUIDED")
-        time.sleep(0.2)
-        self.fly_to(target_qr_ned, timeout=10.0, tol=0.25)
+                        if self.drone.spin_motors:
+                            tilt_r = max(-8.0, min(8.0, (err_u / (fw * 0.5)) * 7.5))
+                            tilt_p = max(-8.0, min(8.0, -(err_v / (fh * 0.5)) * 7.5))
+                            self.drone.set_attitude(tilt_r, tilt_p)
+                            rps1 = max(0, int((self.drone.servos[0] - 1000) * 0.12))
+                            rps2 = max(0, int((self.drone.servos[1] - 1000) * 0.12))
+                            rps3 = max(0, int((self.drone.servos[2] - 1000) * 0.12))
+                            rps4 = max(0, int((self.drone.servos[3] - 1000) * 0.12))
+                            print(f"  [ALIGN TILT] QR Centering Iter {iteration+1}/{a.center_iters}: Offset: ({err_u:+.1f}, {err_v:+.1f})px | Cmd Tilt: Roll={tilt_r:+.1f}° Pitch={tilt_p:+.1f}° | ESC: M1={self.drone.servos[0]}(~{rps1}rps) M2={self.drone.servos[1]}(~{rps2}rps) M3={self.drone.servos[2]}(~{rps3}rps) M4={self.drone.servos[3]}(~{rps4}rps)")
 
-        # Fine Closed-Loop Centering
-        for iteration in range(a.center_iters):
-            self.drone.poll()
-            frame = self.worker.get_frame()
-            if frame is None:
-                continue
-            ok, pts, _, cand_txt = self.detect_qr(frame)
-            if ok and pts is not None and len(pts) > 0:
-                p = pts.reshape(-1, 2)
-                u, v = float(np.mean(p[:, 0])), float(np.mean(p[:, 1]))
-                fw, fh = frame.shape[1], frame.shape[0]
-                cx, cy = fw / 2.0, fh / 2.0
-                err_u = u - cx
-                err_v = v - cy
-                err_px = math.hypot(err_u, err_v)
+                        self.update_hud(target_pts=pts, target_type="QR", score_or_dist=1.0)
+                        if err_px <= a.center_tol:
+                            print(f"[QR CENTERING] Lock acquired! (Offset {err_px:.1f}px <= tol {a.center_tol:.1f}px)")
+                            if self.drone.spin_motors:
+                                self.drone.set_attitude(0.0, 0.0)
+                            break
+                        dn, de = pixel_to_ned_offset(u, v, fw, fh, self.alt_rel, self.drone.yaw, a.hfov_rad)
+                        target_qr_ned[0] += dn * 0.70
+                        target_qr_ned[1] += de * 0.70
+                        self.fly_to(target_qr_ned, timeout=1.5, yaw=self.corridor_heading)
 
-                if self.drone.spin_motors:
-                    tilt_r = max(-8.0, min(8.0, (err_u / (fw * 0.5)) * 7.5))
-                    tilt_p = max(-8.0, min(8.0, -(err_v / (fh * 0.5)) * 7.5))
-                    self.drone.set_attitude(tilt_r, tilt_p)
-                    rps1 = max(0, int((self.drone.servos[0] - 1000) * 0.12))
-                    rps2 = max(0, int((self.drone.servos[1] - 1000) * 0.12))
-                    rps3 = max(0, int((self.drone.servos[2] - 1000) * 0.12))
-                    rps4 = max(0, int((self.drone.servos[3] - 1000) * 0.12))
-                    print(f"  [ALIGN TILT] QR Centering Iter {iteration+1}/{a.center_iters}: Offset: ({err_u:+.1f}, {err_v:+.1f})px | Cmd Tilt: Roll={tilt_r:+.1f}° Pitch={tilt_p:+.1f}° | ESC: M1={self.drone.servos[0]}(~{rps1}rps) M2={self.drone.servos[1]}(~{rps2}rps) M3={self.drone.servos[2]}(~{rps3}rps) M4={self.drone.servos[3]}(~{rps4}rps)")
+                # 15-Second Alignment Hover
+                print(f"[ALIGN] Commencing rock-solid hover hold for {a.align_duration:.1f} seconds...")
+                t_hold = time.time()
+                last_log = 0.0
+                while time.time() - t_hold < a.align_duration:
+                    rem = max(0.0, a.align_duration - (time.time() - t_hold))
+                    self.hud_countdown = rem
+                    self.drone.poll()
+                    frame = self.worker.get_frame()
+                    pts = None
+                    if frame is not None:
+                        ok, pts, _, _ = self.detect_qr(frame)
+                        if ok and pts is not None and len(pts) > 0:
+                            p = pts.reshape(-1, 2)
+                            u, v = float(np.mean(p[:, 0])), float(np.mean(p[:, 1]))
+                            fw, fh = frame.shape[1], frame.shape[0]
+                            cx, cy = fw / 2.0, fh / 2.0
+                            err_u, err_v = u - cx, v - cy
+                            if self.drone.spin_motors:
+                                tilt_r = max(-8.0, min(8.0, (err_u / (fw * 0.5)) * 7.5))
+                                tilt_p = max(-8.0, min(8.0, -(err_v / (fh * 0.5)) * 7.5))
+                                self.drone.set_attitude(tilt_r, tilt_p)
+                        elif self.drone.spin_motors:
+                            self.drone.set_attitude(0.0, 0.0)
 
-                self.update_hud(target_pts=pts, target_type="QR", score_or_dist=1.0)
-                if err_px <= a.center_tol:
-                    print(f"[QR CENTERING] Lock acquired! (Offset {err_px:.1f}px <= tol {a.center_tol:.1f}px)")
-                    if self.drone.spin_motors:
-                        self.drone.set_attitude(0.0, 0.0)
-                    break
-                dn, de = pixel_to_ned_offset(u, v, fw, fh, -self.drone.ned[2], self.drone.yaw, a.hfov_rad)
-                target_qr_ned[0] += dn * 0.70
-                target_qr_ned[1] += de * 0.70
-                self.fly_to(target_qr_ned, timeout=1.5)
-
-        # 15-Second Alignment Hover
-        print(f"[ALIGN] Commencing rock-solid hover hold for {a.align_duration:.1f} seconds...")
-        t_hold = time.time()
-        last_log = 0.0
-        while time.time() - t_hold < a.align_duration:
-            rem = max(0.0, a.align_duration - (time.time() - t_hold))
-            self.hud_countdown = rem
-            self.drone.poll()
-            frame = self.worker.get_frame()
-            pts = None
-            if frame is not None:
-                ok, pts, _, _ = self.detect_qr(frame)
-                if ok and pts is not None and len(pts) > 0:
-                    p = pts.reshape(-1, 2)
-                    u, v = float(np.mean(p[:, 0])), float(np.mean(p[:, 1]))
-                    fw, fh = frame.shape[1], frame.shape[0]
-                    cx, cy = fw / 2.0, fh / 2.0
-                    err_u, err_v = u - cx, v - cy
-                    if self.drone.spin_motors:
-                        tilt_r = max(-8.0, min(8.0, (err_u / (fw * 0.5)) * 7.5))
-                        tilt_p = max(-8.0, min(8.0, -(err_v / (fh * 0.5)) * 7.5))
-                        self.drone.set_attitude(tilt_r, tilt_p)
-                elif self.drone.spin_motors:
-                    self.drone.set_attitude(0.0, 0.0)
-
-            self.drone.setpoint(*target_qr_ned)
-            self.update_hud(target_pts=pts, target_type="QR", score_or_dist=1.0)
-            now_t = time.time()
-            if self.drone.spin_motors and (now_t - last_log >= 1.0):
-                last_log = now_t
-                rps1 = max(0, int((self.drone.servos[0] - 1000) * 0.12))
-                rps2 = max(0, int((self.drone.servos[1] - 1000) * 0.12))
-                rps3 = max(0, int((self.drone.servos[2] - 1000) * 0.12))
-                rps4 = max(0, int((self.drone.servos[3] - 1000) * 0.12))
-                print(f"[ALIGN HOVER] Remaining: {rem:4.1f}s | Cmd Tilt: Roll={self.drone.cmd_roll_deg:+.1f}° Pitch={self.drone.cmd_pitch_deg:+.1f}° | ESC: M1={self.drone.servos[0]}(~{rps1}rps) M2={self.drone.servos[1]}(~{rps2}rps) M3={self.drone.servos[2]}(~{rps3}rps) M4={self.drone.servos[3]}(~{rps4}rps)")
-            time.sleep(0.05)
-        self.hud_countdown = 0.0
-        print(f"\n[ALIGN HOVER] 15-second alignment hold complete!")
+                    self.drone.setpoint(target_qr_ned[0], target_qr_ned[1], target_qr_ned[2], yaw=self.corridor_heading)
+                    self.update_hud(target_pts=pts, target_type="QR", score_or_dist=1.0)
+                    now_t = time.time()
+                    if self.drone.spin_motors and (now_t - last_log >= 1.0):
+                        last_log = now_t
+                        rps1 = max(0, int((self.drone.servos[0] - 1000) * 0.12))
+                        rps2 = max(0, int((self.drone.servos[1] - 1000) * 0.12))
+                        rps3 = max(0, int((self.drone.servos[2] - 1000) * 0.12))
+                        rps4 = max(0, int((self.drone.servos[3] - 1000) * 0.12))
+                        print(f"[ALIGN HOVER] Remaining: {rem:4.1f}s | Cmd Tilt: Roll={self.drone.cmd_roll_deg:+.1f}° Pitch={self.drone.cmd_pitch_deg:+.1f}° | ESC: M1={self.drone.servos[0]}(~{rps1}rps) M2={self.drone.servos[1]}(~{rps2}rps) M3={self.drone.servos[2]}(~{rps3}rps) M4={self.drone.servos[3]}(~{rps4}rps)")
+                    time.sleep(0.05)
+                self.hud_countdown = 0.0
+                print(f"\n[ALIGN HOVER] 15-second alignment hold complete!")
 
         # ==============================================================
-        # STAGE 11: Return Corridor (Blue Banner) Detection & Surge Back
+        # STAGE 11: Return Corridor (Blue Banner Prediction, Search & Entry)
         # ==============================================================
-        print(f"\n{'='*70}\nSTAGE 11: RETURN CORRIDOR (BLUE BANNER) DETECTION & SURGE BACK\n{'='*70}")
+        print(f"\n{'='*70}\nSTAGE 11: RETURN CORRIDOR (BLUE BANNER) DETECTION & TRANSIT\n{'='*70}")
         self.state_text = "STAGE 11: TRANSITION TO RETURN CORRIDOR"
 
-        # Return corridor is adjacent to green corridor:
-        # Green corridor lateral position was East = -sway_x
-        # Return corridor offset: default +3.5m (to the right / East of green corridor)
-        offset_dir = 1.0 if a.return_corridor_side == "right" else -1.0
-        blue_corridor_east = -self.sway_x + (offset_dir * abs(a.return_corridor_offset))
-        blue_entrance_north = corridor_exit_north + 2.0  # Just outside north exit, facing South
+        # Predict Blue Banner return corridor entrance:
+        # Based on measured Green Banner position, corridor heading, spacing and forward offset
+        side_mult = 1.0 if a.return_corridor_side.lower() == "right" else -1.0
+        return_heading = wrap_pi(self.corridor_heading + math.pi)  # 180° opposite (facing South)
 
-        print(f"[RETURN CORRIDOR] Known spatial relationship: Adjacent to Green Corridor (-{self.sway_x:.2f}m)")
-        print(f"[RETURN CORRIDOR] Return Corridor East: {blue_corridor_east:+.2f}m | Entrance North: {blue_entrance_north:+.2f}m")
+        n_blue_pred = (self.green_banner_ned[0] + fwd_corr[0] * a.return_corridor_forward +
+                       right_corr[0] * (side_mult * a.return_corridor_spacing))
+        e_blue_pred = (self.green_banner_ned[1] + fwd_corr[1] * a.return_corridor_forward +
+                       right_corr[1] * (side_mult * a.return_corridor_spacing))
 
-        # 1. Fly to standoff position outside the return corridor entrance
-        sp_blue_approach = [blue_entrance_north, blue_corridor_east, -a.alt]
-        self.fly_to(sp_blue_approach, timeout=18.0)
+        print(f"[RETURN PREDICTION] Green Banner Position: N={self.green_banner_ned[0]:+.2f}m, E={self.green_banner_ned[1]:+.2f}m")
+        print(f"[RETURN PREDICTION] Corridor Spacing: {a.return_corridor_spacing:.1f}m ({a.return_corridor_side}) | Forward Offset: {a.return_corridor_forward:.1f}m")
+        print(f"[RETURN PREDICTION] Predicted Blue Entrance: N={n_blue_pred:+.2f}m, E={e_blue_pred:+.2f}m | Return Heading={math.degrees(return_heading):+.1f}°")
 
-        # 2. Yaw drone 180 degrees (South) to look directly into the return corridor
-        print("[RETURN CORRIDOR] Yawing 180 degrees (South) to face return corridor entrance...")
-        self.state_text = "STAGE 11: YAWING SOUTH (180 deg)"
-        yaw_south = math.pi
-        t_yaw = time.time()
-        while time.time() - t_yaw < 3.0:
+        # 1. Fly to predicted entrance at transit altitude
+        sp_blue_pred = [n_blue_pred, e_blue_pred, self.takeoff_ned[2] - a.alt]
+        self.fly_to(sp_blue_pred, timeout=20.0, yaw=self.corridor_heading)
+
+        # 2. Turn to return heading (corridor_heading + 180°)
+        print("[RETURN CORRIDOR] Turning to return heading (180° opposite)...")
+        self.state_text = "STAGE 11: TURNING TO RETURN HEADING"
+        self.current_yaw_lock = return_heading
+        t_turn = time.time()
+        while time.time() - t_turn < 3.0:
             self.drone.poll()
-            self.drone.setpoint(*sp_blue_approach, yaw=yaw_south)
+            self.drone.setpoint(sp_blue_pred[0], sp_blue_pred[1], sp_blue_pred[2], yaw=return_heading)
             self.update_hud()
             time.sleep(0.05)
 
-        # 3. Detect Blue Banner visually
+        # 3. Active Blue Banner search: Check prediction, then local search pattern
         self.state_text = "STAGE 11: SEARCHING BLUE BANNER"
-        print("[VISION] Searching for BLUE BANNER ('AeroTHON 2026')...")
+        print("[VISION] Searching for BLUE BANNER (#0000FF) at predicted entrance...")
         found_blue = None
-        t_search_blue = time.time()
-        while time.time() - t_search_blue < 10.0:
+        t_check_pred = time.time()
+        while time.time() - t_check_pred < 3.0:
             self.drone.poll()
             frame = self.worker.get_frame()
             if frame is not None:
-                meas = self.banner_detector.detect(
-                    frame, color="blue", alt_m=-self.drone.ned[2], hfov_rad=a.hfov_rad
+                meas, _, _ = self.banner_detector.detect(
+                    frame, color="blue", alt_rel=self.alt_rel, hfov_rad=a.hfov_rad
                 )
                 if meas is not None:
                     found_blue = meas
-                    self.update_hud(target_pts=meas["quad"], target_type="BLUE_BANNER", subtext=meas["source"])
-                    print(f"[BLUE BANNER DETECTED!] Source: {meas['source']} | Offset: u={meas['u']:.1f}, v={meas['v']:.1f}")
                     break
-                self.update_hud()
             time.sleep(0.08)
 
-        if found_blue is None and a.bench_sim:
-            print(f"[BENCH-SIM] Simulated Blue Banner detected at Return Corridor entrance (North={blue_entrance_north:+.1f}m, East={blue_corridor_east:+.1f}m)")
-            found_blue = {
-                "u": 640.0, "v": 360.0, "size": (1280, 720),
-                "source": "BENCH_SIM", "text": "AeroTHON 2026", "partial": False,
-                "quad": np.array([[200, 300], [900, 300], [900, 380], [200, 380]], dtype=np.float32)
-            }
+        # Local search pattern (±3m lateral, ±1.5m longitudinal) if not classified at prediction
+        if found_blue is None:
+            print("[RETURN CORRIDOR] Blue banner not classified at initial point. Flying search pattern (±3m lat, ±1.5m fwd)...")
+            search_offsets = [
+                (0.0, -2.5),
+                (0.0, 2.5),
+                (1.5, 0.0),
+                (-1.5, 0.0),
+                (1.5, 2.0),
+                (-1.5, -2.0)
+            ]
+            for fwd_off, lat_off in search_offsets:
+                wp_search = [
+                    n_blue_pred + fwd_corr[0] * fwd_off + right_corr[0] * lat_off,
+                    e_blue_pred + fwd_corr[1] * fwd_off + right_corr[1] * lat_off,
+                    self.takeoff_ned[2] - a.alt
+                ]
+                self.fly_to(wp_search, timeout=8.0, yaw=return_heading)
+                t_dwell = time.time()
+                while time.time() - t_dwell < 2.0:
+                    self.drone.poll()
+                    frame = self.worker.get_frame()
+                    if frame is not None:
+                        meas, _, _ = self.banner_detector.detect(
+                            frame, color="blue", alt_rel=self.alt_rel, hfov_rad=a.hfov_rad
+                        )
+                        if meas is not None:
+                            found_banner = meas
+                            found_blue = meas
+                            print(f"[BLUE BANNER DETECTED!] In search pattern at offset fwd={fwd_off:+.1f}m, lat={lat_off:+.1f}m")
+                            break
+                    time.sleep(0.08)
+                if found_blue is not None:
+                    break
+
+        # Section B5: If Blue Banner is STILL not found -> DO NOT descend and DO NOT surge blind! Fly home above walls!
+        if found_blue is None:
+            print("\n" + "!" * 70)
+            print("[WARN] Blue Banner was NOT classified after local search pattern.")
+            print("[WARN] ABORTING corridor entry: will NOT descend and will NOT surge corridor blind!")
+            print("[WARN] Flying home at transit altitude (above walls) and landing at takeoff pad.")
+            print("!" * 70 + "\n")
+            self.state_text = "BLUE BANNER NOT FOUND - RETURNING HOME"
+            if self.drone.spin_motors:
+                self.drone.set_attitude(0.0, 0.0)
+            sp_home = [self.takeoff_ned[0], self.takeoff_ned[1], self.takeoff_ned[2] - a.alt]
+            self.fly_to(sp_home, timeout=25.0, yaw=self.takeoff_yaw)
+            self.drone.land()
+            return
 
         # 4. Center over Blue Banner
+        print("[RETURN CORRIDOR] Centering over classified Blue Banner...")
         blue_target_ned = list(self.drone.ned)
-        if found_blue is not None:
-            dn, de = pixel_to_ned_offset(
-                found_blue["u"], found_blue["v"],
-                found_blue["size"][0], found_blue["size"][1],
-                -self.drone.ned[2], self.drone.yaw, a.hfov_rad
-            )
-            blue_target_ned[0] += dn
-            blue_target_ned[1] += de
-            self.fly_to(blue_target_ned, timeout=6.0, yaw=yaw_south)
+        dn, de = pixel_to_ned_offset(
+            found_blue["u"], found_blue["v"],
+            found_blue["size"][0], found_blue["size"][1],
+            self.alt_rel, self.drone.yaw, a.hfov_rad
+        )
+        blue_target_ned[0] += dn
+        blue_target_ned[1] += de
+        self.fly_to(blue_target_ned, timeout=6.0, yaw=return_heading)
 
         blue_target_ned, _ = self.center_over_banner(
-            color="blue", target_ned=blue_target_ned, max_iters=4, tol_px=a.center_tol
+            color="blue", target_ned=blue_target_ned, max_iters=a.center_iters,
+            tol_px=a.center_tol, expected_heading=return_heading
         )
         self.blue_banner_ned = list(blue_target_ned)
 
-        # 5. Descend to corridor altitude (3.0m AGL)
-        print(f"[RETURN CORRIDOR] Descending to {a.corridor_alt:.1f}m AGL...")
-        blue_target_ned[2] = -a.corridor_alt
-        self.fly_to(blue_target_ned, timeout=10.0, yaw=yaw_south)
+        # 5. Descend to corridor altitude (3.0m relative to takeoff point)
+        print(f"[RETURN CORRIDOR] Descending to corridor altitude {a.corridor_alt:.1f}m AGL...")
+        blue_target_ned[2] = self.takeoff_ned[2] - a.corridor_alt
+        self.fly_to(blue_target_ned, timeout=10.0, yaw=self.current_yaw_lock)
 
-        # 6. Surge through return corridor (surging forward in body frame = South towards takeoff)
-        # Heading is South (yaw = pi), so body forward (-X_NED) surges by corridor_surge
-        return_exit_north = blue_target_ned[0] - a.corridor_surge
-        print(f"[RETURN CORRIDOR] Surging {a.corridor_surge:.1f}m South through return corridor -> North={return_exit_north:.1f}m...")
+        # 6. Surge through return corridor along return heading
+        fwd_return, _, _ = get_body_axes(self.current_yaw_lock)
+        print(f"[RETURN CORRIDOR] Surging {a.corridor_surge:.1f}m through return corridor (Heading: {math.degrees(self.current_yaw_lock):+.1f}°)...")
         self.state_text = f"STAGE 11: SURGE RETURN CORRIDOR ({a.corridor_surge:.1f}m)"
-        sp_return_exit = [return_exit_north, blue_target_ned[1], -a.corridor_alt]
-        self.fly_to(sp_return_exit, timeout=a.corridor_surge / 0.8 + 15.0, speed=0.9, yaw=yaw_south)
-        print(f"[RETURN CORRIDOR] Successfully emerged from return corridor at North={self.drone.ned[0]:+.2f}m, East={self.drone.ned[1]:+.2f}m")
+        sp_return_exit = [
+            blue_target_ned[0] + fwd_return[0] * a.corridor_surge,
+            blue_target_ned[1] + fwd_return[1] * a.corridor_surge,
+            self.takeoff_ned[2] - a.corridor_alt
+        ]
+        self.fly_to(sp_return_exit, timeout=a.corridor_surge / 0.8 + 15.0, speed=0.9, yaw=self.current_yaw_lock)
+        print(f"[RETURN CORRIDOR] Successfully emerged from return corridor at N={self.drone.ned[0]:+.2f}m, E={self.drone.ned[1]:+.2f}m")
 
         # ==============================================================
         # STAGE 12: Return to Takeoff Pad (0, 0) & Precision Land
@@ -1668,17 +2019,18 @@ class BannerCorridorQRMission:
         print(f"\n{'='*70}\nSTAGE 12: RETURN TO TAKEOFF POINT & PRECISION LAND\n{'='*70}")
         self.state_text = "STAGE 12: RETURNING TO TAKEOFF PAD"
 
-        # Climb to safe transit altitude and yaw North
-        sp_home_transit = [0.0, 0.0, -a.alt]
-        self.fly_to(sp_home_transit, timeout=20.0, yaw=0.0)
+        # Climb to safe transit altitude and rotate to takeoff heading
+        self.current_yaw_lock = self.takeoff_yaw
+        sp_home_transit = [self.takeoff_ned[0], self.takeoff_ned[1], self.takeoff_ned[2] - a.alt]
+        self.fly_to(sp_home_transit, timeout=20.0, yaw=self.takeoff_yaw)
 
         # Descend to low hover over takeoff pad
-        sp_home_low = [0.0, 0.0, -2.0]
-        self.fly_to(sp_home_low, timeout=8.0, yaw=0.0)
+        sp_home_low = [self.takeoff_ned[0], self.takeoff_ned[1], self.takeoff_ned[2] - 2.0]
+        self.fly_to(sp_home_low, timeout=8.0, yaw=self.takeoff_yaw)
 
-        print("\n" + "#"*70)
+        print("\n" + "#" * 70)
         print(" MISSION OBJECTIVES FULLY ACHIEVED! COMMANDING PRECISION LAND...")
-        print("#"*70 + "\n")
+        print("#" * 70 + "\n")
         self.state_text = "STAGE 12: LANDING"
         self.drone.land()
 
@@ -1691,13 +2043,109 @@ class BannerCorridorQRMission:
         print(f"\n{'='*70}\nMISSION COMPLETED SUCCESSFULLY!\n{'='*70}")
 
     def shutdown(self):
+        self.banner_detector.ocr_worker.stop()
         self.worker.stop()
         if self.show_gui:
             cv2.destroyAllWindows()
 
 
 # ==============================================================================
-# 8. COMMAND LINE ARGUMENT PARSING & ENTRYPOINT
+# 8. STANDALONE VISION TEST TOOL (NO MAVLINK, NO FLIGHT)
+# ==============================================================================
+
+def run_vision_test(args):
+    """
+    Interactive standalone tool to tune HSV thresholds and banner classification on the field.
+    No MAVLink connection or flight commands.
+    Shows rotated rectangles, 4 corners, center, ratio, fill, full-view status, and verdicts.
+    Press 'm' to toggle color mask overlay. Press 'q' or ESC to exit.
+    """
+    target_color = args.vision_test.lower()
+    print("\n" + "=" * 70)
+    print(f" AEROTHON 2026 — STANDALONE VISION TUNING TOOL ({target_color.upper()} BANNER)")
+    print("=" * 70)
+    print(" Controls:")
+    print("   'm' : Toggle Color Mask / Raw Camera Feed overlay")
+    print("   'q' : Quit vision test tool")
+    print("=" * 70 + "\n")
+
+    cam_src = args.camera_src
+    if not cam_src:
+        cam_src = f"rtsp://192.168.144.25:8554/{args.stream}.264"
+    worker = SiyiStreamWorker(capture_source=cam_src)
+    detector = BannerDetector(args, verbose=True)
+
+    show_mask = False
+    window_name = f"AeroTHON Vision Test — {target_color.upper()} Banner"
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(window_name, 960, 540)
+
+    try:
+        while True:
+            frame = worker.get_frame()
+            if frame is None:
+                vis = np.zeros((540, 960, 3), dtype=np.uint8)
+                cv2.putText(vis, f"CONNECTING TO {cam_src}...", (160, 270), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                cv2.imshow(window_name, vis)
+                if cv2.waitKey(50) & 0xFF in (ord('q'), 27):
+                    break
+                continue
+
+            banner, diags, mask = detector.detect(frame, color=target_color, alt_rel=args.alt, hfov_rad=args.hfov_rad)
+
+            if show_mask:
+                mask_bgr = cv2.cvtColor(cv2.resize(mask, (frame.shape[1], frame.shape[0])), cv2.COLOR_GRAY2BGR)
+                vis = cv2.addWeighted(frame, 0.4, mask_bgr, 0.6, 0)
+            else:
+                vis = frame.copy()
+
+            h, w = vis.shape[:2]
+            cx, cy = w // 2, h // 2
+            cv2.drawMarker(vis, (cx, cy), (0, 255, 255), cv2.MARKER_CROSS, 24, 2)
+
+            # Draw every detected region with rotated rectangle diagnostics
+            for diag in diags:
+                quad = np.int32(diag["quad"]).reshape(-1, 2)
+                is_banner = "BANNER" in diag["verdict"]
+                col = (0, 255, 0) if is_banner else (0, 140, 255)
+
+                cv2.polylines(vis, [quad], True, col, 2 if not is_banner else 3)
+                tcx, tcy = int(diag["center"][0]), int(diag["center"][1])
+                cv2.circle(vis, (tcx, tcy), 5, (0, 0, 255), -1)
+
+                # Diagnostic label
+                edge_str = "CUT" if diag["touching_edge"] else "FULL"
+                status_txt = f"R:{diag['ratio']:.1f} F:{diag['fill']:.2f} [{edge_str}] -> {diag['verdict']}"
+                cv2.putText(vis, status_txt, (tcx - 60, max(20, tcy - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, col, 1)
+
+            # Draw top info banner
+            cv2.rectangle(vis, (0, 0), (w, 42), (20, 20, 20), -1)
+            h_tol = args.green_h_tol if target_color == "green" else args.blue_h_tol
+            s_min = args.green_s_min if target_color == "green" else args.blue_s_min
+            v_min = args.green_v_min if target_color == "green" else args.blue_v_min
+            info_txt = f"COLOR: {target_color.upper()} | H_tol: +/-{h_tol} S_min: {s_min} V_min: {v_min} | Mask: {'ON' if show_mask else 'OFF'} ('m' to toggle)"
+            cv2.putText(vis, info_txt, (15, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
+
+            if banner is not None:
+                b_pts = np.int32(banner["quad"]).reshape(-1, 2)
+                cv2.polylines(vis, [b_pts], True, (0, 255, 0), 4)
+                cv2.putText(vis, f"*** CLASSIFIED {target_color.upper()} BANNER ({banner['source']}) ***",
+                            (15, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+            cv2.imshow(window_name, vis)
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('m'):
+                show_mask = not show_mask
+            elif key in (ord('q'), 27):
+                break
+    finally:
+        detector.ocr_worker.stop()
+        worker.stop()
+        cv2.destroyAllWindows()
+
+
+# ==============================================================================
+# 9. CLI ARGUMENT PARSING & ENTRYPOINT
 # ==============================================================================
 
 def main():
@@ -1716,8 +2164,29 @@ def main():
     p.add_argument("--hfov-rad", type=float, default=1.22, help="Camera Horizontal FOV in radians (~70 deg for SIYI A8 mini)")
     p.add_argument("--ocr-threads", type=int, default=2, help="Number of RapidOCR inference threads")
 
+    # Reference QR Parameters
+    p.add_argument("--ref-qr-timeout", type=float, default=12.0, help="Camera scan timeout for initial reference QR (seconds)")
+
+    # Color Segmentation Parameters (B1)
+    p.add_argument("--green-h-tol", type=int, default=15, help="Green hue tolerance (+/- deg) around #00B140")
+    p.add_argument("--green-s-min", type=int, default=100, help="Green minimum saturation [0-255]")
+    p.add_argument("--green-v-min", type=int, default=70, help="Green minimum brightness/value [0-255]")
+    p.add_argument("--green-min-area", type=float, default=0.0004, help="Green minimum area fraction of frame")
+
+    p.add_argument("--blue-h-tol", type=int, default=15, help="Blue hue tolerance (+/- deg) around #0000FF")
+    p.add_argument("--blue-s-min", type=int, default=100, help="Blue minimum saturation [0-255]")
+    p.add_argument("--blue-v-min", type=int, default=70, help="Blue minimum brightness/value [0-255]")
+    p.add_argument("--blue-min-area", type=float, default=0.0004, help="Blue minimum area fraction of frame")
+
+    # Shape Classification Parameters (B2)
+    p.add_argument("--min-banner-ratio", type=float, default=8.0, help="Minimum long-to-short aspect ratio for banner")
+    p.add_argument("--min-banner-fill", type=float, default=0.60, help="Minimum contour area to rotated rect area ratio")
+    p.add_argument("--banner-persistence", type=int, default=3, help="Required consecutive frames for shape detection")
+    p.add_argument("--check-physical-size", dest="check_physical_size", action="store_true", default=True, help="Check 2-5m physical length sanity")
+    p.add_argument("--no-check-physical-size", dest="check_physical_size", action="store_false", help="Disable physical size sanity check")
+
     # Flight Stage Distances & Geometric Parameters (User-Configurable)
-    p.add_argument("--alt", type=float, default=5.0, help="Takeoff and survey altitude in meters AGL")
+    p.add_argument("--alt", type=float, default=5.0, help="Takeoff and transit altitude in meters AGL")
     p.add_argument("--surge1", type=float, default=2.0, help="Surge 1 forward distance to scan reference QR (meters)")
     p.add_argument("--surge2", type=float, default=2.0, help="Surge 2 forward distance after scanning reference QR (meters)")
     p.add_argument("--max-sway", type=float, default=20.0, help="Maximum left sway distance to search for green banner (meters)")
@@ -1726,8 +2195,8 @@ def main():
     p.add_argument("--corridor-surge", type=float, default=10.0, help="Forward surge distance through corridor (meters)")
     p.add_argument("--wall-offset", type=float, default=19.0, help="Reference wall distance: lateral shift is (wall_offset - x) to land 1m from 20m wall")
 
-    # Lawnmower & QR Matching Parameters
-    p.add_argument("--lawnmower-length", type=float, default=18.0, help="Northward search span for lawnmower grid (meters)")
+    # Lawnmower & QR Matching Parameters (Preserved)
+    p.add_argument("--lawnmower-length", type=float, default=18.0, help="Forward search span for lawnmower grid (meters)")
     p.add_argument("--step", type=float, default=4.0, help="Lawnmower row spacing in meters")
     p.add_argument("--match-thresh", type=float, default=0.88, help="QR similarity matching threshold [0.0 to 1.0]")
     p.add_argument("--align-duration", type=float, default=15.0, help="Hover hold duration over matched QR in seconds")
@@ -1735,8 +2204,9 @@ def main():
     p.add_argument("--center-iters", type=int, default=6, help="Maximum visual servoing iterations")
 
     # Return Corridor & Blue Banner
-    p.add_argument("--return-corridor-offset", type=float, default=3.5, help="Lateral distance to adjacent return corridor relative to green corridor (meters)")
-    p.add_argument("--return-corridor-side", choices=["right", "left"], default="right", help="Side of return corridor relative to forward flight (right/East or left/West)")
+    p.add_argument("--return-corridor-spacing", type=float, default=4.0, help="Center-to-center spacing between corridors (meters)")
+    p.add_argument("--return-corridor-forward", type=float, default=7.0, help="Green banner to blue banner along corridor offset (meters)")
+    p.add_argument("--return-corridor-side", choices=["right", "left"], default="right", help="Side of return corridor relative to forward flight")
 
     # General Speed & Benchtop Testing Options
     p.add_argument("--speed", type=float, default=1.2, help="General fly-to speed in m/s")
@@ -1748,7 +2218,16 @@ def main():
     p.add_argument("--no-camera", dest="show_camera", action="store_false", help="Run headless without GUI window")
     p.add_argument("--verbose", action="store_true", help="Print verbose vision and navigation diagnostics")
 
+    # Standalone Vision Tuning Tool
+    p.add_argument("--vision-test", choices=["green", "blue"], default=None,
+                   help="Run standalone vision test tool to tune HSV thresholds on field without MAVLink")
+
     args = p.parse_args()
+
+    # Section C: Vision Test Tool Mode
+    if args.vision_test is not None:
+        run_vision_test(args)
+        return
 
     mission = BannerCorridorQRMission(args)
     try:
