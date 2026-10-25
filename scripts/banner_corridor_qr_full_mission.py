@@ -509,7 +509,8 @@ class DroneController:
     def __init__(
         self, url: str = "/dev/ttyACM0", baud: int = 921600,
         bench_sim: bool = False, sim_speed: float = 1.2,
-        spin_motors: bool = False, thrust: float = 0.20
+        spin_motors: bool = False, thrust: float = 0.20,
+        use_nogps: bool = False
     ):
         self.bench_sim = bench_sim
         self.sim_speed = sim_speed
@@ -517,6 +518,7 @@ class DroneController:
         self._last_sim_step = time.time()
         self.spin_motors = spin_motors
         self.thrust = thrust
+        self.use_nogps = use_nogps or bench_sim or spin_motors
         self.servos = [1000, 1000, 1000, 1000]
         self.cmd_roll_deg = 0.0
         self.cmd_pitch_deg = 0.0
@@ -638,6 +640,11 @@ class DroneController:
             self.ned = list(self.sim_ned)
 
     def set_mode(self, mode_name: str, timeout: float = 3.0) -> bool:
+        if self.use_nogps and mode_name in ("GUIDED", "BRAKE"):
+            mode_name = "GUIDED_NOGPS"
+            if mode_name == "BRAKE":
+                self.set_attitude(0.0, 0.0)
+
         mode_id = self.m.mode_mapping().get(mode_name)
         if mode_id is None and mode_name == "GUIDED_NOGPS":
             mode_id = 20
@@ -661,16 +668,55 @@ class DroneController:
                     if msg.get_type() == 'COMMAND_ACK' and msg.command == mavutil.mavlink.MAV_CMD_DO_SET_MODE:
                         if msg.result == mavutil.mavlink.MAV_RESULT_ACCEPTED:
                             print(f"[MODE CONFIRMED] Autopilot acknowledged mode {mode_name}!")
+                            self.flightmode = mode_name
                             return True
                     elif msg.get_type() == 'HEARTBEAT' and msg.type != mavutil.mavlink.MAV_TYPE_GCS:
                         if msg.custom_mode == mode_id or self.m.flightmode == mode_name:
                             print(f"[MODE CONFIRMED] Autopilot verified in {mode_name} mode!")
+                            self.flightmode = mode_name
                             return True
             time.sleep(0.1)
+        self.flightmode = mode_name
         return False
 
     def arm_and_takeoff(self, target_alt: float = 5.0):
-        if not self.bench_sim and not self.spin_motors:
+        if self.use_nogps:
+            print("\n" + "#" * 68)
+            print(" BENCHTOP MOTOR ACTIVATION PROCEDURE (PROPELLERS MUST BE OFF! ⚠️)")
+            print(f"  1. Switching Cube Orange+ to GUIDED_NOGPS mode.")
+            print(f"  2. Arming physical motors at safe bench throttle ({self.thrust*100:.0f}% PWM).")
+            print(f"  3. Simulating takeoff climb to {target_alt:.1f}m AGL.")
+            print("#" * 68 + "\n")
+            self.set_mode("GUIDED_NOGPS")
+            time.sleep(0.2)
+            print(f"[DRONE] Arming motors at bench thrust {self.thrust*100:.0f}% in GUIDED_NOGPS...")
+            for _ in range(8):
+                self.m.mav.command_long_send(
+                    self.sys, self.comp,
+                    mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+                    0, 1, 21196, 0, 0, 0, 0, 0
+                )
+                time.sleep(0.25)
+                self.poll()
+                if self.armed:
+                    rps1 = max(0, int((self.servos[0] - 1000) * 0.12))
+                    rps2 = max(0, int((self.servos[1] - 1000) * 0.12))
+                    rps3 = max(0, int((self.servos[2] - 1000) * 0.12))
+                    rps4 = max(0, int((self.servos[3] - 1000) * 0.12))
+                    print(f"[DRONE] Motors ARMED! Active ESC PWM: M1={self.servos[0]}(~{rps1}rps) M2={self.servos[1]}(~{rps2}rps) M3={self.servos[2]}(~{rps3}rps) M4={self.servos[3]}(~{rps4}rps)")
+                    break
+            t0 = time.time()
+            climb_time = 3.5
+            while time.time() - t0 < climb_time:
+                frac = min(1.0, (time.time() - t0) / climb_time)
+                self.sim_ned[2] = -target_alt * frac
+                self.ned = list(self.sim_ned)
+                self.poll()
+                time.sleep(0.05)
+            self.sim_ned[2] = -target_alt
+            self.ned = list(self.sim_ned)
+            print(f"[BENCH-SIM] Target altitude reached: {target_alt:.1f}m AGL")
+        else:
             self.set_mode("GUIDED")
             time.sleep(0.5)
             print("[DRONE] Arming motors in GUIDED mode...")
@@ -692,51 +738,6 @@ class DroneController:
                 mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
                 0, 0, 0, 0, 0, 0, 0, target_alt
             )
-        elif self.spin_motors:
-            print("\n" + "#" * 68)
-            print(" BENCHTOP MOTOR ACTIVATION PROCEDURE (PROPELLERS MUST BE OFF! ⚠️)")
-            print(f"  1. Switching Cube Orange+ to GUIDED_NOGPS mode.")
-            print(f"  2. Arming physical motors at safe bench throttle ({self.thrust*100:.0f}% PWM).")
-            print(f"  3. Simulating takeoff climb to {target_alt:.1f}m AGL.")
-            print("#" * 68 + "\n")
-            self.set_mode("GUIDED_NOGPS")
-            time.sleep(0.2)
-            print(f"[DRONE] Arming motors at bench thrust {self.thrust*100:.0f}%...")
-            for _ in range(8):
-                self.m.mav.command_long_send(
-                    self.sys, self.comp,
-                    mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
-                    0, 1, 21196, 0, 0, 0, 0, 0
-                )
-                time.sleep(0.25)
-                self.poll()
-                if self.armed:
-                    print(f"[DRONE] Motors ARMED! Active ESC PWM: M1={self.servos[0]} M2={self.servos[1]} M3={self.servos[2]} M4={self.servos[3]}")
-                    break
-            t0 = time.time()
-            climb_time = 3.5
-            while time.time() - t0 < climb_time:
-                frac = min(1.0, (time.time() - t0) / climb_time)
-                self.sim_ned[2] = -target_alt * frac
-                self.ned = list(self.sim_ned)
-                self.poll()
-                time.sleep(0.05)
-            self.sim_ned[2] = -target_alt
-            self.ned = list(self.sim_ned)
-            print(f"[BENCH-SIM] Target altitude reached: {target_alt:.1f}m AGL")
-        else:
-            print(f"[BENCH-SIM] Simulating takeoff to {target_alt:.1f}m AGL...")
-            self.set_mode("GUIDED")
-            t0 = time.time()
-            climb_time = 3.5
-            while time.time() - t0 < climb_time:
-                frac = min(1.0, (time.time() - t0) / climb_time)
-                self.sim_ned[2] = -target_alt * frac
-                self.ned = list(self.sim_ned)
-                self.poll()
-                time.sleep(0.05)
-            self.sim_ned[2] = -target_alt
-            self.ned = list(self.sim_ned)
 
     def rearm(self):
         """Re-assert arming if autopilot disarms unexpectedly on bench."""
@@ -863,7 +864,8 @@ class BannerCorridorQRMission:
             bench_sim=args.bench_sim,
             sim_speed=args.speed,
             spin_motors=args.spin_motors,
-            thrust=args.thrust
+            thrust=args.thrust,
+            use_nogps=(args.guided_nogps or args.spin_motors or args.bench_sim)
         )
 
         # Video stream
@@ -894,6 +896,13 @@ class BannerCorridorQRMission:
         self.hud_score = 0.0
         self.active_banner_color = "green"
 
+        # Bounding box visual retention cache
+        self.last_target_pts = None
+        self.last_target_type = None
+        self.last_score_or_dist = 0.0
+        self.last_subtext = ""
+        self.last_target_time = 0.0
+
         self.show_gui = args.show_camera and ("DISPLAY" in os.environ or "WAYLAND_DISPLAY" in os.environ)
         if self.show_gui:
             cv2.namedWindow("AeroTHON Real-World Mission HUD", cv2.WINDOW_NORMAL)
@@ -923,28 +932,66 @@ class BannerCorridorQRMission:
         h, w = vis.shape[:2]
         cx, cy = w // 2, h // 2
 
-        # Reticle
+        # Reticle at image optical center
         cv2.drawMarker(vis, (cx, cy), (0, 255, 255), cv2.MARKER_CROSS, 26, 2)
         cv2.circle(vis, (cx, cy), 18, (0, 255, 255), 1)
 
-        # Highlight detected object (Banner or QR)
+        # Update or retain bounding box cache
+        now = time.time()
+        if target_pts is not None and len(target_pts) > 0:
+            self.last_target_pts = target_pts
+            self.last_target_type = target_type
+            self.last_score_or_dist = score_or_dist
+            self.last_subtext = subtext
+            self.last_target_time = now
+        elif (now - self.last_target_time) < 1.2 and self.last_target_pts is not None:
+            target_pts = self.last_target_pts
+            target_type = self.last_target_type
+            score_or_dist = self.last_score_or_dist
+            subtext = self.last_subtext
+
+        # Highlight detected object (Banner or QR) with clear bounding boxes and corner tags
         if target_pts is not None and len(target_pts) > 0:
             p = np.int32(target_pts).reshape(-1, 2)
             if target_type == "QR":
                 col = (0, 255, 0) if score_or_dist >= self.args.match_thresh else (0, 165, 255)
-                lbl = f"QR Sim: {score_or_dist*100:.1f}%"
+                lbl = f"QR TARGET [Sim: {score_or_dist*100:.1f}%]" if score_or_dist > 0 else f"QR CODE [{subtext}]"
             elif target_type == "BLUE_BANNER":
-                col = (255, 120, 0)
+                col = (255, 140, 0)  # Bright Blue/Cyan in BGR
                 lbl = f"BLUE BANNER [{subtext}]"
             else:
-                col = (0, 255, 0)
+                col = (0, 255, 0)    # Green in BGR
                 lbl = f"GREEN BANNER [{subtext}]"
 
+            # 1. Bounding polygon outline
             cv2.polylines(vis, [p], True, col, 3)
+
+            # 2. Corner markers with coordinates
+            corner_names = ("TL", "TR", "BR", "BL")
+            corner_offsets = ((-25, -10), (10, -10), (10, 20), (-25, 20))
+            for i, (pt, name, (dx, dy)) in enumerate(zip(p[:4], corner_names, corner_offsets)):
+                cv2.circle(vis, (int(pt[0]), int(pt[1])), 5, (0, 0, 255), -1)
+                cv2.circle(vis, (int(pt[0]), int(pt[1])), 7, col, 1)
+                cv2.putText(vis, f"{name}({int(pt[0])},{int(pt[1])})", (int(pt[0]) + dx, int(pt[1]) + dy),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.40, (255, 255, 255), 1)
+
+            # 3. Centroid and line from reticle
             tcx, tcy = int(np.mean(p[:, 0])), int(np.mean(p[:, 1]))
             cv2.circle(vis, (tcx, tcy), 7, (0, 0, 255), -1)
+            cv2.circle(vis, (tcx, tcy), 12, (255, 255, 255), 1)
             cv2.line(vis, (cx, cy), (tcx, tcy), (255, 255, 0), 2)
-            cv2.putText(vis, lbl, (tcx - 60, max(25, tcy - 12)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, col, 2)
+
+            # 4. Text banner badge with solid background
+            (tw, th), _ = cv2.getTextSize(lbl, cv2.FONT_HERSHEY_SIMPLEX, 0.58, 2)
+            lbl_x = max(10, min(w - tw - 15, tcx - tw // 2))
+            lbl_y = max(35, tcy - 20)
+            cv2.rectangle(vis, (lbl_x - 5, lbl_y - th - 5), (lbl_x + tw + 5, lbl_y + 5), (20, 20, 20), -1)
+            cv2.rectangle(vis, (lbl_x - 5, lbl_y - th - 5), (lbl_x + tw + 5, lbl_y + 5), col, 1)
+            cv2.putText(vis, lbl, (lbl_x, lbl_y), cv2.FONT_HERSHEY_SIMPLEX, 0.58, col, 2)
+
+            # 5. Centroid offset label
+            c_lbl = f"C({tcx},{tcy}) Offset: dx={tcx-cx:+d}px dy={tcy-cy:+d}px"
+            cv2.putText(vis, c_lbl, (lbl_x, lbl_y + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (0, 255, 255), 1)
 
         # Header status bar
         cv2.rectangle(vis, (0, 0), (w, 38), (20, 20, 20), -1)
@@ -965,14 +1012,18 @@ class BannerCorridorQRMission:
             cv2.rectangle(vis, (cx - 160, h - 52), (cx + 160, h - 12), (0, 110, 0), -1)
             cv2.putText(vis, f"ALIGN HOLD: {self.hud_countdown:.1f}s", (cx - 145, h - 22), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 0), 2)
 
-        # Motor ESC PWM telemetry on bench test
-        if self.drone.spin_motors:
-            cv2.rectangle(vis, (10, h - 65), (430, h - 8), (25, 25, 25), -1)
-            cv2.rectangle(vis, (10, h - 65), (430, h - 8), (0, 255, 255), 1)
-            m_txt = f"MOTORS: M1={self.drone.servos[0]} | M2={self.drone.servos[1]} | M3={self.drone.servos[2]} | M4={self.drone.servos[3]}"
-            tilt_txt = f"Cmd Tilt: Pitch={self.drone.cmd_pitch_deg:+.1f} deg | Roll={self.drone.cmd_roll_deg:+.1f} deg"
-            cv2.putText(vis, m_txt, (15, h - 42), cv2.FONT_HERSHEY_SIMPLEX, 0.43, (0, 255, 255), 1)
-            cv2.putText(vis, tilt_txt, (15, h - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.43, (255, 255, 0), 1)
+        # Motor ESC PWM & RPM/RPS telemetry bar
+        if self.drone.spin_motors or self.args.bench_sim:
+            cv2.rectangle(vis, (10, h - 72), (540, h - 8), (20, 20, 20), -1)
+            cv2.rectangle(vis, (10, h - 72), (540, h - 8), (0, 255, 255), 1)
+            rps1 = max(0, int((self.drone.servos[0] - 1000) * 0.12))
+            rps2 = max(0, int((self.drone.servos[1] - 1000) * 0.12))
+            rps3 = max(0, int((self.drone.servos[2] - 1000) * 0.12))
+            rps4 = max(0, int((self.drone.servos[3] - 1000) * 0.12))
+            m_txt = f"MOTORS: M1={self.drone.servos[0]}(~{rps1}rps) M2={self.drone.servos[1]}(~{rps2}rps) M3={self.drone.servos[2]}(~{rps3}rps) M4={self.drone.servos[3]}(~{rps4}rps)"
+            tilt_txt = f"Cmd Tilt: Roll={self.drone.cmd_roll_deg:+.1f} deg | Pitch={self.drone.cmd_pitch_deg:+.1f} deg | Mode: {self.drone.flightmode}"
+            cv2.putText(vis, m_txt, (15, h - 44), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (0, 255, 255), 1)
+            cv2.putText(vis, tilt_txt, (15, h - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (0, 255, 0), 1)
 
         cv2.imshow("AeroTHON Real-World Mission HUD", vis)
         cv2.waitKey(1)
@@ -1076,18 +1127,36 @@ class BannerCorridorQRMission:
             )
             if meas is None:
                 print(f"[CENTERING] Iter {iteration}/{max_iters}: {color} banner not visible, holding...")
+                if self.drone.spin_motors:
+                    self.drone.set_attitude(0.0, 0.0)
                 self.fly_to(target, timeout=1.0)
                 continue
 
             fw, fh = meas["size"]
             cx, cy = fw / 2.0, fh / 2.0
-            err_px = math.hypot(meas["u"] - cx, meas["v"] - cy)
+            err_u = meas["u"] - cx
+            err_v = meas["v"] - cy
+            err_px = math.hypot(err_u, err_v)
+
+            # Active visual servoing tilt commanded directly to motors
+            if self.drone.spin_motors:
+                tilt_r = max(-8.0, min(8.0, (err_u / (fw * 0.5)) * 7.5))
+                tilt_p = max(-8.0, min(8.0, -(err_v / (fh * 0.5)) * 7.5))
+                self.drone.set_attitude(tilt_r, tilt_p)
+                rps1 = max(0, int((self.drone.servos[0] - 1000) * 0.12))
+                rps2 = max(0, int((self.drone.servos[1] - 1000) * 0.12))
+                rps3 = max(0, int((self.drone.servos[2] - 1000) * 0.12))
+                rps4 = max(0, int((self.drone.servos[3] - 1000) * 0.12))
+                print(f"  [ALIGN TILT] {color.upper()} Banner Offset: ({err_u:+.1f}, {err_v:+.1f})px | Cmd Tilt: Roll={tilt_r:+.1f}° Pitch={tilt_p:+.1f}° | ESC: M1={self.drone.servos[0]}(~{rps1}rps) M2={self.drone.servos[1]}(~{rps2}rps) M3={self.drone.servos[2]}(~{rps3}rps) M4={self.drone.servos[3]}(~{rps4}rps)")
+
             print(f"[CENTERING] Iter {iteration}/{max_iters}: centroid ({meas['u']:.1f}, {meas['v']:.1f})px | Offset: {err_px:.1f}px | {'PARTIAL' if meas['partial'] else 'FULL'}")
 
             self.update_hud(target_pts=meas["quad"], target_type=f"{color.upper()}_BANNER", subtext=meas["source"])
 
             if err_px <= tol_px and not meas["partial"]:
                 print(f"[CENTERING] Lock acquired! Centroid offset ({err_px:.1f}px) <= tol ({tol_px:.1f}px).")
+                if self.drone.spin_motors:
+                    self.drone.set_attitude(0.0, 0.0)
                 locked = True
                 break
 
@@ -1428,20 +1497,36 @@ class BannerCorridorQRMission:
         self.fly_to(target_qr_ned, timeout=10.0, tol=0.25)
 
         # Fine Closed-Loop Centering
-        for iteration in range(5):
+        for iteration in range(a.center_iters):
             self.drone.poll()
             frame = self.worker.get_frame()
             if frame is None:
                 continue
-            ok, pts, _, _ = self.detect_qr(frame)
+            ok, pts, _, cand_txt = self.detect_qr(frame)
             if ok and pts is not None and len(pts) > 0:
                 p = pts.reshape(-1, 2)
                 u, v = float(np.mean(p[:, 0])), float(np.mean(p[:, 1]))
                 fw, fh = frame.shape[1], frame.shape[0]
-                err_px = math.hypot(u - fw / 2.0, v - fh / 2.0)
-                print(f"[QR CENTERING] Iter {iteration+1}/5: offset {err_px:.1f}px")
+                cx, cy = fw / 2.0, fh / 2.0
+                err_u = u - cx
+                err_v = v - cy
+                err_px = math.hypot(err_u, err_v)
+
+                if self.drone.spin_motors:
+                    tilt_r = max(-8.0, min(8.0, (err_u / (fw * 0.5)) * 7.5))
+                    tilt_p = max(-8.0, min(8.0, -(err_v / (fh * 0.5)) * 7.5))
+                    self.drone.set_attitude(tilt_r, tilt_p)
+                    rps1 = max(0, int((self.drone.servos[0] - 1000) * 0.12))
+                    rps2 = max(0, int((self.drone.servos[1] - 1000) * 0.12))
+                    rps3 = max(0, int((self.drone.servos[2] - 1000) * 0.12))
+                    rps4 = max(0, int((self.drone.servos[3] - 1000) * 0.12))
+                    print(f"  [ALIGN TILT] QR Centering Iter {iteration+1}/{a.center_iters}: Offset: ({err_u:+.1f}, {err_v:+.1f})px | Cmd Tilt: Roll={tilt_r:+.1f}° Pitch={tilt_p:+.1f}° | ESC: M1={self.drone.servos[0]}(~{rps1}rps) M2={self.drone.servos[1]}(~{rps2}rps) M3={self.drone.servos[2]}(~{rps3}rps) M4={self.drone.servos[3]}(~{rps4}rps)")
+
+                self.update_hud(target_pts=pts, target_type="QR", score_or_dist=1.0)
                 if err_px <= a.center_tol:
-                    print("[QR CENTERING] Lock acquired!")
+                    print(f"[QR CENTERING] Lock acquired! (Offset {err_px:.1f}px <= tol {a.center_tol:.1f}px)")
+                    if self.drone.spin_motors:
+                        self.drone.set_attitude(0.0, 0.0)
                     break
                 dn, de = pixel_to_ned_offset(u, v, fw, fh, -self.drone.ned[2], self.drone.yaw, a.hfov_rad)
                 target_qr_ned[0] += dn * 0.70
@@ -1451,19 +1536,38 @@ class BannerCorridorQRMission:
         # 15-Second Alignment Hover
         print(f"[ALIGN] Commencing rock-solid hover hold for {a.align_duration:.1f} seconds...")
         t_hold = time.time()
+        last_log = 0.0
         while time.time() - t_hold < a.align_duration:
             rem = max(0.0, a.align_duration - (time.time() - t_hold))
             self.hud_countdown = rem
             self.drone.poll()
-            if self.drone.spin_motors:
-                self.drone.set_attitude(0.0, 0.0)
-            self.drone.setpoint(*target_qr_ned)
             frame = self.worker.get_frame()
             pts = None
             if frame is not None:
                 ok, pts, _, _ = self.detect_qr(frame)
+                if ok and pts is not None and len(pts) > 0:
+                    p = pts.reshape(-1, 2)
+                    u, v = float(np.mean(p[:, 0])), float(np.mean(p[:, 1]))
+                    fw, fh = frame.shape[1], frame.shape[0]
+                    cx, cy = fw / 2.0, fh / 2.0
+                    err_u, err_v = u - cx, v - cy
+                    if self.drone.spin_motors:
+                        tilt_r = max(-8.0, min(8.0, (err_u / (fw * 0.5)) * 7.5))
+                        tilt_p = max(-8.0, min(8.0, -(err_v / (fh * 0.5)) * 7.5))
+                        self.drone.set_attitude(tilt_r, tilt_p)
+                elif self.drone.spin_motors:
+                    self.drone.set_attitude(0.0, 0.0)
+
+            self.drone.setpoint(*target_qr_ned)
             self.update_hud(target_pts=pts, target_type="QR", score_or_dist=1.0)
-            print(f"[ALIGN HOVER] Remaining: {rem:4.1f}s | Locked over Target QR", end='\r')
+            now_t = time.time()
+            if self.drone.spin_motors and (now_t - last_log >= 1.0):
+                last_log = now_t
+                rps1 = max(0, int((self.drone.servos[0] - 1000) * 0.12))
+                rps2 = max(0, int((self.drone.servos[1] - 1000) * 0.12))
+                rps3 = max(0, int((self.drone.servos[2] - 1000) * 0.12))
+                rps4 = max(0, int((self.drone.servos[3] - 1000) * 0.12))
+                print(f"[ALIGN HOVER] Remaining: {rem:4.1f}s | Cmd Tilt: Roll={self.drone.cmd_roll_deg:+.1f}° Pitch={self.drone.cmd_pitch_deg:+.1f}° | ESC: M1={self.drone.servos[0]}(~{rps1}rps) M2={self.drone.servos[1]}(~{rps2}rps) M3={self.drone.servos[2]}(~{rps3}rps) M4={self.drone.servos[3]}(~{rps4}rps)")
             time.sleep(0.05)
         self.hud_countdown = 0.0
         print(f"\n[ALIGN HOVER] 15-second alignment hold complete!")
@@ -1636,6 +1740,7 @@ def main():
 
     # General Speed & Benchtop Testing Options
     p.add_argument("--speed", type=float, default=1.2, help="General fly-to speed in m/s")
+    p.add_argument("--guided-nogps", action="store_true", help="Force GUIDED_NOGPS flight mode for bench testing without GPS lock")
     p.add_argument("--bench-sim", action="store_true", help="Run in benchtop simulation mode (emulates kinematics while keeping real SIYI camera and real Cube MAVLink commands active)")
     p.add_argument("--spin-motors", action="store_true", help="Spin physical rotors safely on bench during simulation (Props MUST be OFF!)")
     p.add_argument("--thrust", type=float, default=0.20, help="Bench motor thrust [0.10 to 0.35]")
