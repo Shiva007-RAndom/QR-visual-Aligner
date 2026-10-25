@@ -145,12 +145,34 @@ class SiyiStreamWorker:
 # 3. ArduPilot Flight Controller Interface (MAVLink 2)
 # ----------------------------------------------------------------------
 
+def euler_to_quaternion(roll_rad: float, pitch_rad: float, yaw_rad: float = 0.0) -> List[float]:
+    """Converts Euler roll, pitch, yaw (radians) into a MAVLink unit quaternion [w, x, y, z]."""
+    cr = math.cos(roll_rad * 0.5)
+    sr = math.sin(roll_rad * 0.5)
+    cp = math.cos(pitch_rad * 0.5)
+    sp = math.sin(pitch_rad * 0.5)
+    cy = math.cos(yaw_rad * 0.5)
+    sy = math.sin(yaw_rad * 0.5)
+
+    qw = cr * cp * cy + sr * sp * sy
+    qx = sr * cp * cy - cr * sp * sy
+    qy = cr * sp * cy + sr * cp * sy
+    qz = cr * cp * sy - sr * sp * cy
+    return [qw, qx, qy, qz]
+
+
 class DroneController:
-    def __init__(self, url="/dev/ttyACM0", baud=921600, bench_sim=False, sim_speed=1.5):
+    def __init__(self, url="/dev/ttyACM0", baud=921600, bench_sim=False, sim_speed=1.5, spin_motors=False, thrust=0.20):
         self.bench_sim = bench_sim
         self.sim_speed = sim_speed
         self.sim_ned = [0.0, 0.0, 0.0]
         self._last_sim_step = time.time()
+        self.spin_motors = spin_motors
+        self.thrust = thrust
+        self.servos = [1000, 1000, 1000, 1000]
+        self.cmd_roll_deg = 0.0
+        self.cmd_pitch_deg = 0.0
+        self._last_att_send = time.time()
 
         # Auto-parse /dev/tty*:baud if passed with a colon
         if url and url.startswith("/dev/") and ":" in url:
@@ -190,6 +212,29 @@ class DroneController:
         print(f"[MAVLINK] Heartbeat confirmed! System {self.sys}, Component {self.comp}")
         if self.bench_sim:
             print("[MAVLINK] BENCH-SIMULATION MODE ACTIVE: Flight kinematics emulated on benchtop.")
+        if self.spin_motors:
+            print(f"[MAVLINK] HARDWARE ROTOR ACTIVATION: Real motors enabled at safe bench thrust ({self.thrust*100:.0f}% PWM).")
+            # Request motor servo telemetry at 20 Hz
+            self.m.mav.request_data_stream_send(
+                self.sys, self.comp,
+                mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS, 20, 1
+            )
+
+    def _send_attitude_target(self):
+        q = euler_to_quaternion(
+            math.radians(self.cmd_roll_deg),
+            math.radians(self.cmd_pitch_deg),
+            0.0
+        )
+        self.m.mav.set_attitude_target_send(
+            0, self.sys, self.comp,
+            0b00000111, q,
+            0, 0, 0, self.thrust
+        )
+
+    def set_attitude(self, roll_deg: float, pitch_deg: float):
+        self.cmd_roll_deg = max(-10.0, min(10.0, roll_deg))
+        self.cmd_pitch_deg = max(-10.0, min(10.0, pitch_deg))
 
     def poll(self):
         now = time.time()
@@ -202,7 +247,9 @@ class DroneController:
             if msg is None:
                 break
             mtype = msg.get_type()
-            if mtype == "LOCAL_POSITION_NED" and not self.bench_sim:
+            if mtype == "SERVO_OUTPUT_RAW":
+                self.servos = [msg.servo1_raw, msg.servo2_raw, msg.servo3_raw, msg.servo4_raw]
+            elif mtype == "LOCAL_POSITION_NED" and not self.bench_sim:
                 self.ned = [msg.x, msg.y, msg.z]
             elif mtype == "ATTITUDE":
                 self.yaw = msg.yaw
@@ -211,6 +258,12 @@ class DroneController:
 
         if self.bench_sim:
             self.ned = list(self.sim_ned)
+
+        # In GUIDED_NOGPS with spin_motors, continuously stream attitude targets at ~20 Hz
+        if self.spin_motors and self.armed:
+            if now - self._last_att_send >= 0.05:
+                self._send_attitude_target()
+                self._last_att_send = now
 
     def set_mode(self, mode_name: str):
         mode_id = self.m.mode_mapping().get(mode_name)
@@ -226,7 +279,7 @@ class DroneController:
                 time.sleep(0.04)
 
     def arm_and_takeoff(self, target_alt: float = 4.0):
-        if not self.bench_sim:
+        if not self.bench_sim and not self.spin_motors:
             self.set_mode("GUIDED")
             time.sleep(0.5)
             print("[DRONE] Arming motors...")
@@ -248,6 +301,58 @@ class DroneController:
                 mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
                 0, 0, 0, 0, 0, 0, 0, target_alt
             )
+        elif self.spin_motors:
+            print("\n" + "#" * 68)
+            print(" BENCHTOP MOTOR ACTIVATION PROCEDURE (PROPELLERS MUST BE OFF! ⚠️)")
+            print(f"  1. Switching Cube Orange+ to GUIDED_NOGPS mode.")
+            print(f"  2. Arming physical motors at safe bench throttle ({self.thrust*100:.0f}% PWM).")
+            print("  3. Simulating takeoff climb to 4.0m AGL.")
+            print("  4. Press Ctrl+C at any moment to immediately stop and DISARM.")
+            print("#" * 68 + "\n")
+            print("Starting motor spin in 3 seconds... (Confirm Props are REMOVED!)")
+            for sec in [3, 2, 1]:
+                print(f"  Countdown: {sec}...", flush=True)
+                time.sleep(1.0)
+
+            # Switch to GUIDED_NOGPS (mode 20)
+            self.m.mav.command_long_send(
+                self.sys, self.comp,
+                mavutil.mavlink.MAV_CMD_DO_SET_MODE,
+                0,
+                mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                20, 0, 0, 0, 0, 0
+            )
+            time.sleep(0.2)
+
+            # Prime attitude target stream before arming
+            for _ in range(6):
+                self._send_attitude_target()
+                time.sleep(0.04)
+
+            print(f"[DRONE] Arming motors at bench thrust {self.thrust*100:.0f}%...")
+            for _ in range(8):
+                self.m.mav.command_long_send(
+                    self.sys, self.comp,
+                    mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+                    0, 1, 21196, 0, 0, 0, 0, 0
+                )
+                time.sleep(0.25)
+                self.poll()
+                if self.armed:
+                    print(f"[DRONE] Motors ARMED successfully! Active ESC PWM: M1={self.servos[0]} M2={self.servos[1]} M3={self.servos[2]} M4={self.servos[3]}")
+                    break
+
+            t0 = time.time()
+            climb_time = 3.0
+            while time.time() - t0 < climb_time:
+                frac = min(1.0, (time.time() - t0) / climb_time)
+                self.sim_ned[2] = -target_alt * frac
+                self.ned = list(self.sim_ned)
+                self.poll()
+                time.sleep(0.05)
+            self.sim_ned[2] = -target_alt
+            self.ned = list(self.sim_ned)
+            print(f"[BENCH-SIM] Target altitude reached: {target_alt:.1f}m AGL")
         else:
             print("[BENCH-SIM] Emulating autonomous takeoff to 4.0m AGL (Props are OFF)...")
             self.set_mode("GUIDED")
@@ -264,16 +369,17 @@ class DroneController:
             print(f"[BENCH-SIM] Target altitude reached: {target_alt:.1f}m AGL")
 
     def setpoint(self, north: float, east: float, down: float):
-        type_mask = 0b110111111000
-        self.m.mav.set_position_target_local_ned_send(
-            0, self.sys, self.comp,
-            mavutil.mavlink.MAV_FRAME_LOCAL_NED,
-            type_mask,
-            north, east, down,
-            0, 0, 0,
-            0, 0, 0,
-            0, 0
-        )
+        if not self.spin_motors:
+            type_mask = 0b110111111000
+            self.m.mav.set_position_target_local_ned_send(
+                0, self.sys, self.comp,
+                mavutil.mavlink.MAV_FRAME_LOCAL_NED,
+                type_mask,
+                north, east, down,
+                0, 0, 0,
+                0, 0, 0,
+                0, 0
+            )
         if self.bench_sim:
             now = time.time()
             dt = max(0.001, min(0.2, now - self._last_sim_step))
@@ -288,9 +394,46 @@ class DroneController:
             self.sim_ned[2] = down
             self.ned = list(self.sim_ned)
 
+            if self.spin_motors and dist_horiz > 0.1:
+                # Tilt quadcopter towards velocity vector
+                # Pitch down (-) = fly North (+), Roll right (+) = fly East (+)
+                target_pitch = max(-6.0, min(6.0, -(d_n / max(dist_horiz, 1.0)) * 5.0))
+                target_roll = max(-6.0, min(6.0, (d_e / max(dist_horiz, 1.0)) * 5.0))
+                self.set_attitude(target_roll, target_pitch)
+
     def land(self):
         print("[DRONE] Commanding LAND...")
-        self.set_mode("LAND")
+        if self.spin_motors:
+            print("[DRONE] Ramping down motor throttle safely...")
+            t_ramp = time.time()
+            init_thrust = self.thrust
+            while time.time() - t_ramp < 2.0:
+                frac = max(0.0, 1.0 - (time.time() - t_ramp) / 2.0)
+                self.thrust = init_thrust * frac
+                self.set_attitude(0.0, 0.0)
+                self.poll()
+                time.sleep(0.05)
+            self.thrust = 0.0
+            print("[DRONE] Disarming motors...")
+            for _ in range(5):
+                self.m.mav.command_long_send(
+                    self.sys, self.comp,
+                    mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+                    0, 0, 0, 0, 0, 0, 0, 0
+                )
+                time.sleep(0.1)
+            # Switch back to STABILIZE mode
+            self.m.mav.command_long_send(
+                self.sys, self.comp,
+                mavutil.mavlink.MAV_CMD_DO_SET_MODE,
+                0,
+                mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                0, 0, 0, 0, 0, 0
+            )
+            self.armed = False
+            print("[COMPLETE] Multirotor disarmed and safe!")
+        else:
+            self.set_mode("LAND")
 
 
 # ----------------------------------------------------------------------
@@ -321,11 +464,16 @@ def build_real_world_lawnmower_route(
 class RealWorldLawnmowerMission:
     def __init__(self, args):
         self.args = args
+        if args.spin_motors:
+            args.bench_sim = True
+
         self.drone = DroneController(
             url=args.url,
             baud=args.baud,
             bench_sim=args.bench_sim,
-            sim_speed=args.speed
+            sim_speed=args.speed,
+            spin_motors=args.spin_motors,
+            thrust=args.thrust
         )
 
         # Video stream
@@ -395,6 +543,15 @@ class RealWorldLawnmowerMission:
             cd_box = f"ALIGNMENT LOCK: {self.hud_countdown:.1f}s"
             cv2.rectangle(vis, (cx - 160, h - 50), (cx + 160, h - 10), (0, 120, 0), -1)
             cv2.putText(vis, cd_box, (cx - 150, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 0), 2)
+
+        # Motors status overlay
+        if self.drone.spin_motors:
+            cv2.rectangle(vis, (10, h - 68), (440, h - 8), (25, 25, 25), -1)
+            cv2.rectangle(vis, (10, h - 68), (440, h - 8), (0, 255, 255), 1)
+            m_txt = f"MOTORS: M1={self.drone.servos[0]} | M2={self.drone.servos[1]} | M3={self.drone.servos[2]} | M4={self.drone.servos[3]}"
+            tilt_txt = f"Cmd Tilt: Roll: {self.drone.cmd_roll_deg:+.1f} deg | Pitch: {self.drone.cmd_pitch_deg:+.1f} deg"
+            cv2.putText(vis, m_txt, (16, h - 44), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (0, 255, 255), 1)
+            cv2.putText(vis, tilt_txt, (16, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (255, 255, 0), 1)
 
         cv2.imshow("Autonomous Mission HUD", vis)
         cv2.waitKey(1)
@@ -571,8 +728,11 @@ class RealWorldLawnmowerMission:
                                 print(f"{'!'*65}\n")
 
                                 # ACTIVE BRAKE: Freeze drone horizontally immediately!
-                                print("[BRAKE] Switching to BRAKE mode to halt horizontal momentum...")
-                                self.drone.set_mode("BRAKE")
+                                print("[BRAKE] Target QR matched! Halting horizontal momentum...")
+                                if self.drone.spin_motors:
+                                    self.drone.set_attitude(0.0, 0.0)
+                                else:
+                                    self.drone.set_mode("BRAKE")
                                 self.update_hud(self.drone.ned, detected_pts, sim_score)
                                 break
 
@@ -648,6 +808,11 @@ class RealWorldLawnmowerMission:
                 u, v = float(np.mean(p[:, 0])), float(np.mean(p[:, 1]))
                 err_px = math.hypot(u - cx, v - cy)
                 print(f"[CENTERING] Iteration {iteration+1}/6: Centroid ({u:.1f}, {v:.1f})px | Offset: {err_px:.1f}px")
+                if self.drone.spin_motors:
+                    tilt_r = max(-8.0, min(8.0, (u - cx) * 0.025))
+                    tilt_p = max(-8.0, min(8.0, -(v - cy) * 0.025))
+                    self.drone.set_attitude(tilt_r, tilt_p)
+                    print(f"            [MOTOR TILT] Commanded: Roll={tilt_r:+.1f} deg, Pitch={tilt_p:+.1f} deg | ESC PWM: M1={self.drone.servos[0]} M2={self.drone.servos[1]} M3={self.drone.servos[2]} M4={self.drone.servos[3]}")
                 self.update_hud(self.drone.ned, pts, score=1.0)
 
                 if err_px <= self.args.center_tol:
@@ -684,6 +849,8 @@ class RealWorldLawnmowerMission:
             remaining = max(0.0, self.args.align_duration - elapsed)
             self.hud_countdown = remaining
             self.drone.poll()
+            if self.drone.spin_motors:
+                self.drone.set_attitude(0.0, 0.0)
             self.drone.setpoint(*target_qr_ned)
             frame = self.worker.get_frame()
             pts = None
@@ -735,6 +902,8 @@ def main():
     parser.add_argument("--no-camera", dest="show_camera", action="store_false", help="Disable GUI HUD (headless)")
     parser.add_argument("--land-after", action="store_true", help="Automatically land after alignment hold")
     parser.add_argument("--bench-sim", action="store_true", help="Run full mission in benchtop simulation mode (emulates kinematics while keeping real SIYI camera and real Cube MAVLink commands active)")
+    parser.add_argument("--spin-motors", action="store_true", help="Spin physical rotors safely on bench during simulation (Props MUST be OFF!)")
+    parser.add_argument("--thrust", type=float, default=0.20, help="Bench motor thrust [0.10 to 0.35] (default: 0.20)")
     args = parser.parse_args()
 
     mission = RealWorldLawnmowerMission(args)
