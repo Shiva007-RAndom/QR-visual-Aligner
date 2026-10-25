@@ -435,13 +435,6 @@ class DroneController:
             self.sim_ned[2] = down
             self.ned = list(self.sim_ned)
 
-            if self.spin_motors and dist_horiz > 0.1:
-                # Tilt quadcopter towards velocity vector
-                # Pitch down (-) = fly North (+), Roll right (+) = fly East (+)
-                target_pitch = max(-6.0, min(6.0, -(d_n / max(dist_horiz, 1.0)) * 5.0))
-                target_roll = max(-6.0, min(6.0, (d_e / max(dist_horiz, 1.0)) * 5.0))
-                self.set_attitude(target_roll, target_pitch)
-
     def land(self):
         print("[DRONE] Commanding LAND...")
         if self.spin_motors:
@@ -702,6 +695,14 @@ class RealWorldLawnmowerMission:
             if dist_to_tgt < 1.0:
                 print(f"[TRANSITION] Entered search zone at ({self.drone.ned[0]:.1f}m, {self.drone.ned[1]:.1f}m)!")
                 break
+
+            if self.drone.spin_motors and dist_to_tgt > 0.3:
+                d_n = entry_wp[0] - self.drone.ned[0]
+                d_e = entry_wp[1] - self.drone.ned[1]
+                t_pitch = max(-6.0, min(6.0, -(d_n / dist_to_tgt) * 5.5))
+                t_roll = max(-6.0, min(6.0, (d_e / dist_to_tgt) * 5.5))
+                self.drone.set_attitude(t_roll, t_pitch)
+
             dist_sp = math.hypot(entry_wp[0] - cur_setpoint[0], entry_wp[1] - cur_setpoint[1])
             step = min(self.args.speed * dt, dist_sp)
             if dist_sp > 1e-4:
@@ -731,6 +732,18 @@ class RealWorldLawnmowerMission:
                 if self.drone.spin_motors and not self.drone.armed:
                     print("\n[AUTOPILOT ALERT] Autopilot reported DISARMED! Re-asserting arm in GUIDED_NOGPS...")
                     self.drone.rearm()
+
+                # Active motor tilt based on destination waypoint vector
+                if self.drone.spin_motors:
+                    wp_dn = tgt_ned[0] - self.drone.ned[0]
+                    wp_de = tgt_ned[1] - self.drone.ned[1]
+                    dist_wp = math.hypot(wp_dn, wp_de)
+                    if dist_wp > 0.3:
+                        wp_pitch = max(-6.0, min(6.0, -(wp_dn / dist_wp) * 5.5))
+                        wp_roll = max(-6.0, min(6.0, (wp_de / dist_wp) * 5.5))
+                        self.drone.set_attitude(wp_roll, wp_pitch)
+                    else:
+                        self.drone.set_attitude(0.0, 0.0)
 
                 now_t = time.time()
                 if self.drone.spin_motors and (now_t - last_motor_log >= 1.0):
