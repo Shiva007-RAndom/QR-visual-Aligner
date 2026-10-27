@@ -679,45 +679,197 @@ class BannerDetector:
 
 
 # ==============================================================================
-# 5. ROTATION-INVARIANT QR ENGINE (NO MODIFICATION AS SPECIFIED)
+# 5. QRDET YOLO QR ENGINE (PORTED FROM THE qr_match ROS 2 SIM NODE)
 # ==============================================================================
 
-def extract_qr_features(gray: np.ndarray, quad_pts: np.ndarray, grid_size: int = 21) -> Tuple[np.ndarray, np.ndarray]:
-    """Warp QR quad to 210x210, binarize, and sample 21x21 binary module grid."""
-    quad = order_corners(quad_pts)
-    dst = np.array([
-        [0, 0],
-        [grid_size * 10 - 1, 0],
-        [grid_size * 10 - 1, grid_size * 10 - 1],
-        [0, grid_size * 10 - 1]
-    ], dtype=np.float32)
-    matrix = cv2.getPerspectiveTransform(quad, dst)
-    warped = cv2.warpPerspective(gray, matrix, (grid_size * 10, grid_size * 10))
+WARP_SIZE = 300
+VALID_MODULE_COUNTS = [21 + 4 * (v - 1) for v in range(1, 15)]  # QR v1..v14
 
-    _, binary = cv2.threshold(warped, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-    grid = np.zeros((grid_size, grid_size), dtype=np.uint8)
+def warp_qr(image_bgr: np.ndarray, det: Dict[str, Any], padding: int = 10) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    """Perspective-correct one qrdet detection into a square grayscale image.
+
+    Returns (gray_warp, quad); quad is None when no polygon was available and
+    a padded bounding-box crop was used instead.
+    """
+    height, width = image_bgr.shape[:2]
+
+    quad = None
+    for key in ("quad_xy", "padded_quad_xy", "polygon_xy"):
+        raw = det.get(key)
+        if raw is None:
+            continue
+        p = np.asarray(raw, dtype=np.float32).reshape(-1, 2)
+        if p.shape[0] == 4:
+            quad = order_corners(p)
+        elif p.shape[0] > 4:  # many-vertex polygon -> its min-area box
+            quad = order_corners(cv2.boxPoints(cv2.minAreaRect(p)))
+        break
+
+    if quad is not None:
+        dst = np.array([[0, 0], [WARP_SIZE - 1, 0],
+                        [WARP_SIZE - 1, WARP_SIZE - 1], [0, WARP_SIZE - 1]],
+                       dtype=np.float32)
+        matrix = cv2.getPerspectiveTransform(quad, dst)
+        warped = cv2.warpPerspective(image_bgr, matrix, (WARP_SIZE, WARP_SIZE))
+        return cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY), quad
+
+    x1, y1, x2, y2 = (int(v) for v in det["bbox_xyxy"])
+    cy1, cy2 = max(0, y1 - padding), min(height, y2 + padding)
+    cx1, cx2 = max(0, x1 - padding), min(width, x2 + padding)
+    crop = image_bgr[cy1:cy2, cx1:cx2]
+    if crop.size == 0:
+        return np.zeros((WARP_SIZE, WARP_SIZE), np.uint8), None
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    return cv2.resize(gray, (WARP_SIZE, WARP_SIZE), interpolation=cv2.INTER_AREA), None
+
+
+def normalize_qr(gray: np.ndarray) -> np.ndarray:
+    """Binarise a warped QR so module colours survive uneven lighting."""
+    binary = cv2.adaptiveThreshold(
+        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 51, 10)
+    return cv2.morphologyEx(binary, cv2.MORPH_CLOSE, np.ones((2, 2), np.uint8))
+
+
+def estimate_module_count(binary: np.ndarray) -> int:
+    """Estimate the module count from run lengths along a few scan lines.
+
+    The most common same-colour run is one module wide, so the median run
+    length estimates module size; snap the result to a legal QR size.
+    """
+    size = binary.shape[0]
+    runs: List[int] = []
+    for frac in (0.2, 0.35, 0.5, 0.65, 0.8):
+        idx = min(int(size * frac), size - 1)
+        for line in (binary[idx, :], binary[:, idx]):
+            changes = np.flatnonzero(np.diff((line < 128).astype(np.uint8)))
+            if changes.size >= 2:
+                runs.extend(np.diff(changes).tolist())
+    if not runs or np.median(runs) <= 0:
+        return 25
+    modules = size / float(np.median(runs))
+    return min(VALID_MODULE_COUNTS, key=lambda v: abs(v - modules))
+
+
+def extract_module_grid(binary: np.ndarray, grid_size: Optional[int] = None) -> np.ndarray:
+    """Sample a binarised QR into an NxN uint8 grid (1 = dark module).
+
+    Each module is read as the median of a small patch, which is far less
+    sensitive to sensor noise than a single-pixel sample.
+    """
+    size = binary.shape[0]
+    if grid_size is None:
+        grid_size = estimate_module_count(binary)
+    cell = size / grid_size
+    half = max(1, int(cell * 0.25))
+    grid = np.zeros((grid_size, grid_size), np.uint8)
     for r in range(grid_size):
+        cy = min(int(r * cell + cell / 2), size - 1)
+        y0, y1 = max(0, cy - half), min(size, cy + half + 1)
         for c in range(grid_size):
-            y0, y1 = r * 10 + 2, r * 10 + 8
-            x0, x1 = c * 10 + 2, c * 10 + 8
-            grid[r, c] = 1 if np.mean(binary[y0:y1, x0:x1]) < 128 else 0
+            cx = min(int(c * cell + cell / 2), size - 1)
+            x0, x1 = max(0, cx - half), min(size, cx + half + 1)
+            grid[r, c] = 1 if np.median(binary[y0:y1, x0:x1]) < 128 else 0
+    return grid
 
-    return grid, warped
 
-
-def compute_similarity(grid_ref: np.ndarray, grid_cand: np.ndarray) -> float:
-    """Calculate 4-rotation invariant agreement score in [0.0, 1.0]."""
-    if grid_ref is None or grid_cand is None:
-        return 0.0
-    best_score = 0.0
-    cand = grid_cand.copy()
+def compute_match_score(grid_a: np.ndarray, grid_b: np.ndarray) -> float:
+    """Fraction of modules that agree, maximised over the 4 rotations."""
+    if grid_a.shape != grid_b.shape:
+        size = max(grid_a.shape[0], grid_b.shape[0])
+        grid_a = cv2.resize(grid_a, (size, size), interpolation=cv2.INTER_NEAREST)
+        grid_b = cv2.resize(grid_b, (size, size), interpolation=cv2.INTER_NEAREST)
+    best, cand = 0.0, grid_b.copy()
     for _ in range(4):
-        agreement = float(np.sum(grid_ref == cand)) / float(grid_ref.size)
-        if agreement > best_score:
-            best_score = agreement
+        best = max(best, float(np.sum(grid_a == cand) / grid_a.size))
         cand = np.rot90(cand)
-    return best_score
+    return best
+
+
+class QRMatcher:
+    """qrdet YOLO detector + module-grid matcher (same pipeline as the sim's qr_match node).
+
+    Weights load in the constructor so the model is ready (and a missing
+    install fails) before takeoff, not on the first frame in flight.
+    """
+    def __init__(self, model_size: str = "s", conf_th: float = 0.5, trust_text: bool = True):
+        try:
+            from qrdet import QRDetector
+        except ImportError as e:
+            raise RuntimeError("qrdet is required for QR detection (pip3 install qrdet)") from e
+        try:
+            self.detector = QRDetector(model_size=model_size, conf_th=conf_th)
+        except TypeError:  # older qrdet has no conf_th
+            self.detector = QRDetector(model_size=model_size)
+        self.trust_text = trust_text
+        self.cv_decoder = cv2.QRCodeDetector()
+        try:
+            from pyzbar import pyzbar
+            self.pyzbar = pyzbar
+        except ImportError:
+            self.pyzbar = None
+
+    def decode(self, crop_bgr: np.ndarray) -> str:
+        """Decode a QR crop to text, or '' on failure. A failure is never fatal."""
+        if crop_bgr is None or crop_bgr.size == 0:
+            return ""
+        try:
+            data, _, _ = self.cv_decoder.detectAndDecode(crop_bgr)
+            if data:
+                return data
+            if self.pyzbar is not None:
+                found = self.pyzbar.decode(crop_bgr)
+                if found:
+                    return found[0].data.decode("utf-8", errors="ignore")
+        except Exception:
+            pass
+        return ""
+
+    def detect(self, frame_bgr: np.ndarray, grid_size: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Find every QR in the frame. Each result: quad (4,2), bbox, conf, grid, warped, text.
+
+        Pass grid_size=<reference grid size> so candidate grids are directly comparable.
+        """
+        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        height, width = frame_bgr.shape[:2]
+        out = []
+        for det in self.detector.detect(image=rgb, is_bgr=False):
+            if "bbox_xyxy" not in det:
+                continue
+            warped, quad = warp_qr(frame_bgr, det)
+            grid = extract_module_grid(normalize_qr(warped), grid_size)
+            x1, y1, x2, y2 = (int(v) for v in det["bbox_xyxy"])
+            x1, y1, x2, y2 = max(0, x1), max(0, y1), min(width, x2), min(height, y2)
+            if quad is None:  # bbox-only fallback: use the box corners for centring/HUD
+                quad = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.float32)
+            crop = frame_bgr[max(0, y1 - 10):min(height, y2 + 10),
+                             max(0, x1 - 10):min(width, x2 + 10)]
+            out.append({
+                "quad": quad,
+                "bbox": (x1, y1, x2, y2),
+                "conf": float(det.get("confidence", 0.0)),
+                "grid": grid,
+                "warped": warped,
+                "text": self.decode(crop),
+            })
+        return out
+
+    def score(self, ref_grid: np.ndarray, ref_text: str, det: Dict[str, Any]) -> float:
+        """Match score in [0, 1]. If both QRs decoded, an exact payload test beats the fuzzy grid."""
+        if self.trust_text and ref_text and det["text"]:
+            return 1.0 if det["text"] == ref_text else 0.0
+        return compute_match_score(ref_grid, det["grid"])
+
+    def best_match(
+        self, frame_bgr: np.ndarray, ref_grid: np.ndarray, ref_text: str
+    ) -> Tuple[float, Optional[Dict[str, Any]], int]:
+        """Score every QR in the frame against the reference. Returns (best_score, best_det, n_detected)."""
+        dets = self.detect(frame_bgr, grid_size=int(ref_grid.shape[0]))
+        if not dets:
+            return 0.0, None, 0
+        scored = [(self.score(ref_grid, ref_text, d), d) for d in dets]
+        best_score, best_det = max(scored, key=lambda s: s[0])
+        return best_score, best_det, len(dets)
 
 
 # ==============================================================================
@@ -1094,12 +1246,7 @@ class BannerCorridorQRMission:
         # Vision Engines
         print("[VISION] Initializing Banner Detector & QR Engines...")
         self.banner_detector = BannerDetector(args, verbose=args.verbose)
-        self.qr_detector = cv2.QRCodeDetector()
-        try:
-            from pyzbar.pyzbar import decode as pyzbar_decode
-            self.pyzbar_decode = pyzbar_decode
-        except ImportError:
-            self.pyzbar_decode = None
+        self.qr_matcher = QRMatcher(model_size=args.qr_model_size, conf_th=args.qr_conf)
 
         # Mission State Variables
         self.ref_grid = None
@@ -1258,26 +1405,10 @@ class BannerCorridorQRMission:
     # ------------------------------------------------------------------
     # QR Detection Helper
     # ------------------------------------------------------------------
-    def detect_qr(self, frame: np.ndarray) -> Tuple[bool, Optional[np.ndarray], np.ndarray, str]:
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        ok, pts = self.qr_detector.detect(gray)
-        text = ""
-        if (not ok or pts is None) and self.pyzbar_decode is not None:
-            decoded = self.pyzbar_decode(gray)
-            if decoded:
-                poly = decoded[0].polygon
-                if len(poly) == 4:
-                    pts = np.array([[p.x, p.y] for p in poly], dtype=np.float32).reshape(1, 4, 2)
-                    ok = True
-                    text = decoded[0].data.decode('utf-8', errors='ignore')
-        if ok and pts is not None and not text:
-            try:
-                txt, _, _ = self.qr_detector.detectAndDecode(gray)
-                if txt:
-                    text = txt
-            except Exception:
-                pass
-        return ok, pts, gray, text
+    def find_target_qr(self, frame: np.ndarray) -> Tuple[float, Optional[Dict[str, Any]]]:
+        """Best reference-matching QR in the frame: (score, detection or None)."""
+        score, det, _ = self.qr_matcher.best_match(frame, self.ref_grid, self.ref_text)
+        return score, det
 
     # ------------------------------------------------------------------
     # Slewed Setpoint Flight Helper (Heading Locked)
@@ -1486,17 +1617,18 @@ class BannerCorridorQRMission:
             self.drone.setpoint(sp_surge1[0], sp_surge1[1], sp_surge1[2], yaw=self.takeoff_yaw)
             frame = self.worker.get_frame()
             if frame is not None:
-                ok, pts, gray, text = self.detect_qr(frame)
-                if ok and pts is not None and len(pts) > 0:
-                    grid, warped = extract_qr_features(gray, pts, grid_size=21)
-                    self.ref_grid = grid
-                    self.ref_warped = warped
-                    self.ref_text = text
+                dets = self.qr_matcher.detect(frame)
+                if dets:
+                    best = max(dets, key=lambda d: d["conf"])
+                    self.ref_grid = best["grid"]
+                    self.ref_warped = best["warped"]
+                    self.ref_text = best["text"]
                     # Save snapshot for logging only (NEVER read back from disk)
                     save_path = "/home/suasrasp/aerothon_ws/reference_qr_memorized.png"
-                    cv2.imwrite(save_path, warped)
-                    print(f"\n[SUCCESS] REFERENCE QR MEMORIZED FROM CAMERA! Payload: '{self.ref_text}'")
-                    self.update_hud(target_pts=pts, target_type="QR", score_or_dist=1.0)
+                    cv2.imwrite(save_path, best["warped"])
+                    print(f"\n[SUCCESS] REFERENCE QR MEMORIZED FROM CAMERA! "
+                          f"{self.ref_grid.shape[0]}x{self.ref_grid.shape[0]} modules, conf={best['conf']:.2f}, Payload: '{self.ref_text}'")
+                    self.update_hud(target_pts=best["quad"], target_type="QR", score_or_dist=1.0)
                     break
                 self.update_hud()
             time.sleep(0.08)
@@ -1730,16 +1862,11 @@ class BannerCorridorQRMission:
                     is_match = False
 
                     if frame is not None and self.ref_grid is not None:
-                        ok, detected_pts, gray, cand_txt = self.detect_qr(frame)
-                        if ok and detected_pts is not None and len(detected_pts) > 0:
-                            cand_grid, _ = extract_qr_features(gray, detected_pts, grid_size=21)
-                            sim_score = compute_similarity(self.ref_grid, cand_grid)
-
-                            if cand_txt and self.ref_text and cand_txt == self.ref_text:
-                                is_match = True
-                                sim_score = 1.0
-                            elif sim_score >= a.match_thresh:
-                                is_match = True
+                        sim_score, best_qr, _ = self.qr_matcher.best_match(frame, self.ref_grid, self.ref_text)
+                        if best_qr is not None:
+                            detected_pts = best_qr["quad"]
+                            cand_txt = best_qr["text"]
+                            is_match = sim_score >= a.match_thresh
 
                             if is_match:
                                 p = detected_pts.reshape(-1, 2)
@@ -1806,8 +1933,9 @@ class BannerCorridorQRMission:
                     frame = self.worker.get_frame()
                     if frame is None:
                         continue
-                    ok, pts, _, cand_txt = self.detect_qr(frame)
-                    if ok and pts is not None and len(pts) > 0:
+                    _, target_det = self.find_target_qr(frame)
+                    if target_det is not None:
+                        pts = target_det["quad"]
                         p = pts.reshape(-1, 2)
                         u, v = float(np.mean(p[:, 0])), float(np.mean(p[:, 1]))
                         fw, fh = frame.shape[1], frame.shape[0]
@@ -1848,8 +1976,9 @@ class BannerCorridorQRMission:
                     frame = self.worker.get_frame()
                     pts = None
                     if frame is not None:
-                        ok, pts, _, _ = self.detect_qr(frame)
-                        if ok and pts is not None and len(pts) > 0:
+                        _, target_det = self.find_target_qr(frame)
+                        if target_det is not None:
+                            pts = target_det["quad"]
                             p = pts.reshape(-1, 2)
                             u, v = float(np.mean(p[:, 0])), float(np.mean(p[:, 1]))
                             fw, fh = frame.shape[1], frame.shape[0]
@@ -2198,7 +2327,9 @@ def main():
     # Lawnmower & QR Matching Parameters (Preserved)
     p.add_argument("--lawnmower-length", type=float, default=18.0, help="Forward search span for lawnmower grid (meters)")
     p.add_argument("--step", type=float, default=4.0, help="Lawnmower row spacing in meters")
-    p.add_argument("--match-thresh", type=float, default=0.88, help="QR similarity matching threshold [0.0 to 1.0]")
+    p.add_argument("--match-thresh", type=float, default=0.85, help="QR similarity matching threshold [0.0 to 1.0]")
+    p.add_argument("--qr-model-size", choices=["n", "s", "m", "l"], default="s", help="qrdet YOLO model size")
+    p.add_argument("--qr-conf", type=float, default=0.5, help="qrdet detector confidence floor")
     p.add_argument("--align-duration", type=float, default=15.0, help="Hover hold duration over matched QR in seconds")
     p.add_argument("--center-tol", type=float, default=25.0, help="Visual servoing centering tolerance in pixels")
     p.add_argument("--center-iters", type=int, default=6, help="Maximum visual servoing iterations")
